@@ -1,0 +1,5 @@
+__pycache__/
+example_output/
+example_forecast.csv
+example_inventory.csv
+example_price.csv
