@@ -70,6 +70,10 @@ class LinearAgent:
         Returns:
             Normalized features
         """
+        # Check for NaN values and replace with zeros
+        if np.isnan(features).any():
+            features = np.nan_to_num(features, nan=0.0)
+            
         # Update feature statistics (during training)
         if self.feature_count < 10000:  # Only update for the first N observations
             self.feature_count += 1
@@ -83,7 +87,13 @@ class LinearAgent:
                 self.feature_stds = np.sqrt(var_sum / self.feature_count + 1e-8)
         
         # Normalize features
-        return (features - self.feature_means) / (self.feature_stds + 1e-8)
+        normalized = (features - self.feature_means) / (self.feature_stds + 1e-8)
+        
+        # Additional check for NaN after normalization
+        if np.isnan(normalized).any():
+            normalized = np.nan_to_num(normalized, nan=0.0)
+            
+        return normalized
     
     def get_q_values(self, features: np.ndarray) -> np.ndarray:
         """
@@ -101,6 +111,10 @@ class LinearAgent:
         # Calculate Q-values using linear function: Q(s,a) = w_a^T * features
         q_values = np.dot(self.weights, norm_features)
         
+        # Check for NaN values
+        if np.isnan(q_values).any():
+            q_values = np.nan_to_num(q_values, nan=0.0)
+            
         return q_values
     
     def act(self, state: np.ndarray, explore: bool = True) -> int:
@@ -142,6 +156,11 @@ class LinearAgent:
         Returns:
             TD error magnitude
         """
+        # Check for NaN values
+        if np.isnan(state).any() or np.isnan(next_state).any() or np.isnan(reward):
+            # Return zero TD error if there are NaN values
+            return 0.0
+            
         # Store experience in buffer
         if len(self.buffer) < self.buffer_size:
             self.buffer.append((state, action, reward, next_state, done))
@@ -166,6 +185,10 @@ class LinearAgent:
         # Calculate target using standard Q-learning update
         target = reward + self.gamma * next_q
         
+        # Handle potential NaN values
+        if np.isnan(current_q) or np.isnan(target):
+            return 0.0
+            
         # TD error
         td_error = target - current_q
         
@@ -195,8 +218,13 @@ class LinearAgent:
         batch = [self.buffer[i] for i in indices]
         
         total_error = 0.0
+        valid_samples = 0
         
         for state, action, reward, next_state, done in batch:
+            # Skip samples with NaN values
+            if np.isnan(state).any() or np.isnan(next_state).any() or np.isnan(reward):
+                continue
+                
             # Normalize states
             norm_state = self.normalize_features(state)
             norm_next_state = self.normalize_features(next_state)
@@ -214,6 +242,10 @@ class LinearAgent:
             # Calculate target
             target = reward + self.gamma * next_q
             
+            # Skip if target or current_q is NaN
+            if np.isnan(current_q) or np.isnan(target):
+                continue
+                
             # TD error
             td_error = target - current_q
             
@@ -221,8 +253,13 @@ class LinearAgent:
             self.weights[action] += self.learning_rate * td_error * norm_state
             
             total_error += abs(td_error)
+            valid_samples += 1
         
-        return total_error / batch_size
+        # Return average TD error over valid samples
+        if valid_samples > 0:
+            return total_error / valid_samples
+        else:
+            return 0.0
     
     def calculate_adjusted_forecast(self, action_idx: int, forecast: float,
                                    adjustment_factors: List[float] = None) -> float:
@@ -244,6 +281,10 @@ class LinearAgent:
         # Ensure action index is valid
         action_idx = max(0, min(action_idx, len(adjustment_factors) - 1))
         
+        # Check for NaN forecast
+        if np.isnan(forecast):
+            return 0.0
+            
         # Apply factor to forecast
         factor = adjustment_factors[action_idx]
         adjusted_forecast = forecast * factor
@@ -311,197 +352,5 @@ class LinearAgent:
         agent.feature_stds = data['feature_stds']
         agent.feature_count = data['feature_count']
         agent.action_counts = data['action_counts']
-        
-        return agent
-
-
-class ClusteredLinearAgent:
-    """
-    Manages multiple linear agents for different SKU clusters for improved scalability.
-    """
-    
-    def __init__(self, 
-                num_clusters: int,
-                feature_dim: int,
-                action_size: int,
-                learning_rate: float = 0.01,
-                gamma: float = 0.99):
-        """
-        Initialize a clustered linear agent.
-        
-        Args:
-            num_clusters: Number of SKU clusters
-            feature_dim: Dimension of state features
-            action_size: Number of possible adjustment actions
-            learning_rate: Learning rate for weight updates
-            gamma: Discount factor
-        """
-        # Create one agent per cluster
-        self.agents = [
-            LinearAgent(
-                feature_dim=feature_dim,
-                action_size=action_size,
-                learning_rate=learning_rate,
-                gamma=gamma
-            ) for _ in range(num_clusters)
-        ]
-        
-        self.num_clusters = num_clusters
-        self.feature_dim = feature_dim
-        self.action_size = action_size
-        self.cluster_mapping = {}  # Maps SKU ID to cluster ID
-    
-    def set_cluster_mapping(self, mapping: Dict[str, int]) -> None:
-        """
-        Set the mapping from SKU IDs to cluster IDs.
-        
-        Args:
-            mapping: Dictionary mapping SKU ID to cluster ID
-        """
-        self.cluster_mapping = mapping
-    
-    def get_cluster_id(self, sku_id: str) -> int:
-        """
-        Get the cluster ID for a given SKU.
-        
-        Args:
-            sku_id: SKU identifier
-            
-        Returns:
-            Cluster ID
-        """
-        return self.cluster_mapping.get(sku_id, 0)
-    
-    def act(self, state: np.ndarray, sku_id: str, explore: bool = True) -> int:
-        """
-        Select an adjustment action for the given SKU based on its state.
-        
-        Args:
-            state: Current state features
-            sku_id: SKU identifier
-            explore: Whether to use exploration
-            
-        Returns:
-            Action index
-        """
-        cluster_id = self.get_cluster_id(sku_id)
-        return self.agents[cluster_id].act(state, explore)
-    
-    def update(self, state: np.ndarray, action: int, reward: float,
-               next_state: np.ndarray, done: bool, sku_id: str) -> float:
-        """
-        Update the agent for the corresponding cluster.
-        
-        Args:
-            state: Current state features
-            action: Action taken
-            reward: Reward received
-            next_state: Next state features
-            done: Whether the episode is done
-            sku_id: SKU identifier
-            
-        Returns:
-            TD error magnitude
-        """
-        cluster_id = self.get_cluster_id(sku_id)
-        return self.agents[cluster_id].update(state, action, reward, next_state, done)
-    
-    def batch_update(self, batch_size: int = 32) -> float:
-        """
-        Perform batch updates for all clusters.
-        
-        Args:
-            batch_size: Batch size for each cluster
-            
-        Returns:
-            Average TD error magnitude across all clusters
-        """
-        total_error = 0
-        for agent in self.agents:
-            total_error += agent.batch_update(batch_size)
-        return total_error / len(self.agents)
-    
-    def calculate_adjusted_forecast(self, action_idx: int, forecast: float, 
-                                  sku_id: Optional[str] = None) -> float:
-        """
-        Calculate adjusted forecast based on action and original forecast.
-        
-        Args:
-            action_idx: Action index
-            forecast: Original forecast value
-            sku_id: Optional SKU ID (not used in calculation but included for API consistency)
-            
-        Returns:
-            Adjusted forecast
-        """
-        # All clusters use the same adjustment factors
-        adjustment_factors = [0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3]
-        action_idx = max(0, min(action_idx, len(adjustment_factors) - 1))
-        
-        factor = adjustment_factors[action_idx]
-        adjusted_forecast = forecast * factor
-        return max(0, adjusted_forecast)
-    
-    def save(self, base_filepath: str) -> None:
-        """
-        Save all cluster agents to files.
-        
-        Args:
-            base_filepath: Base path for saving agent files
-        """
-        # Create directory if it doesn't exist
-        os.makedirs(os.path.dirname(base_filepath), exist_ok=True)
-        
-        # Save each agent
-        for i, agent in enumerate(self.agents):
-            filepath = f"{base_filepath}_cluster_{i}.pkl"
-            agent.save(filepath)
-        
-        # Save cluster mapping
-        with open(f"{base_filepath}_mapping.pkl", 'wb') as f:
-            pickle.dump(self.cluster_mapping, f)
-        
-        # Save metadata
-        metadata = {
-            'num_clusters': self.num_clusters,
-            'feature_dim': self.feature_dim,
-            'action_size': self.action_size
-        }
-        with open(f"{base_filepath}_metadata.pkl", 'wb') as f:
-            pickle.dump(metadata, f)
-    
-    @classmethod
-    def load(cls, base_filepath: str) -> 'ClusteredLinearAgent':
-        """
-        Load a clustered agent from files.
-        
-        Args:
-            base_filepath: Base path for loading agent files
-            
-        Returns:
-            Loaded clustered agent
-        """
-        # Load metadata
-        with open(f"{base_filepath}_metadata.pkl", 'rb') as f:
-            metadata = pickle.load(f)
-        
-        # Create agent with metadata
-        agent = cls(
-            num_clusters=metadata['num_clusters'],
-            feature_dim=metadata['feature_dim'],
-            action_size=metadata['action_size']
-        )
-        
-        # Load individual cluster agents
-        for i in range(metadata['num_clusters']):
-            filepath = f"{base_filepath}_cluster_{i}.pkl"
-            if os.path.exists(filepath):
-                agent.agents[i] = LinearAgent.load(filepath)
-        
-        # Load cluster mapping
-        mapping_path = f"{base_filepath}_mapping.pkl"
-        if os.path.exists(mapping_path):
-            with open(mapping_path, 'rb') as f:
-                agent.cluster_mapping = pickle.load(f)
         
         return agent

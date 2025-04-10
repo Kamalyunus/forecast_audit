@@ -31,7 +31,7 @@ class ForecastAdjustmentTrainer:
         Initialize trainer.
         
         Args:
-            agent: LinearAgent or ClusteredLinearAgent
+            agent: LinearAgent
             environment: Forecast environment
             output_dir: Directory for outputs
             num_episodes: Number of episodes to train
@@ -115,22 +115,14 @@ class ForecastAdjustmentTrainer:
                     sku_state = state[i]
                     
                     # Get action from agent
-                    if hasattr(self.agent, 'get_cluster_id'):
-                        # Clustered agent
-                        action_idx = self.agent.act(sku_state, sku)
-                    else:
-                        # Regular agent
-                        action_idx = self.agent.act(sku_state)
+                    action_idx = self.agent.act(sku_state)
                     
                     # Extract forecast from state
                     forecasts = sku_state[:forecast_dim]
                     current_forecast = forecasts[0]  # Current day's forecast
                     
                     # Calculate adjusted forecast based on action
-                    if hasattr(self.agent, 'get_cluster_id'):
-                        adjusted_forecast = self.agent.calculate_adjusted_forecast(action_idx, current_forecast, sku)
-                    else:
-                        adjusted_forecast = self.agent.calculate_adjusted_forecast(action_idx, current_forecast)
+                    adjusted_forecast = self.agent.calculate_adjusted_forecast(action_idx, current_forecast)
                     
                     adjustments[sku] = (action_idx, adjusted_forecast)
                 
@@ -154,18 +146,11 @@ class ForecastAdjustmentTrainer:
                     action_idx, _ = adjustments[sku]
                     
                     # Update agent
-                    if hasattr(self.agent, 'update'):
-                        # Direct agent
-                        td_error = self.agent.update(sku_state, action_idx, rewards[sku], next_sku_state, done)
-                        episode_td_errors.append(td_error)
-                    elif hasattr(self.agent, 'get_cluster_id'):
-                        # Clustered agent
-                        td_error = self.agent.update(sku_state, action_idx, rewards[sku], next_sku_state, done, sku)
-                        episode_td_errors.append(td_error)
+                    td_error = self.agent.update(sku_state, action_idx, rewards[sku], next_sku_state, done)
+                    episode_td_errors.append(td_error)
                 
-                # Batch update (if available)
-                if hasattr(self.agent, 'batch_update'):
-                    self.agent.batch_update(self.batch_size)
+                # Batch update
+                self.agent.batch_update(self.batch_size)
                 
                 # Update state
                 state = next_state
@@ -280,19 +265,11 @@ class ForecastAdjustmentTrainer:
         plt.xlabel('Episode')
         plt.ylabel('Improvement Ratio')
         
-        # Plot action distribution (last 100 episodes)
+        # Plot action distribution
         plt.subplot(2, 2, 4)
-        
-        if hasattr(self.agent, 'agents'):
-            # Clustered agent - aggregate across clusters
-            action_counts = np.zeros(self.agent.action_size)
-            for cluster_agent in self.agent.agents:
-                action_counts += cluster_agent.action_counts
-        else:
-            # Regular agent
-            action_counts = self.agent.action_counts
-            
+        action_counts = self.agent.action_counts
         total_actions = np.sum(action_counts)
+        
         if total_actions > 0:
             action_distribution = action_counts / total_actions
             labels = [f"{factor:.1f}x" for factor in self.adjustment_factors]
@@ -351,22 +328,14 @@ class ForecastAdjustmentTrainer:
                     sku_state = state[i]
                     
                     # Get action from agent (no exploration)
-                    if hasattr(self.agent, 'get_cluster_id'):
-                        # Clustered agent
-                        action_idx = self.agent.act(sku_state, sku, explore=False)
-                    else:
-                        # Regular agent
-                        action_idx = self.agent.act(sku_state, explore=False)
+                    action_idx = self.agent.act(sku_state, explore=False)
                     
                     # Extract forecast from state
                     forecasts = sku_state[:forecast_dim]
                     current_forecast = forecasts[0]  # Current day's forecast
                     
                     # Calculate adjusted forecast based on action
-                    if hasattr(self.agent, 'get_cluster_id'):
-                        adjusted_forecast = self.agent.calculate_adjusted_forecast(action_idx, current_forecast, sku)
-                    else:
-                        adjusted_forecast = self.agent.calculate_adjusted_forecast(action_idx, current_forecast)
+                    adjusted_forecast = self.agent.calculate_adjusted_forecast(action_idx, current_forecast)
                     
                     adjustments[sku] = (action_idx, adjusted_forecast)
                     
@@ -549,12 +518,7 @@ class ForecastAdjustmentTrainer:
                 sku_state = state[i]
                 
                 # Get action from agent (no exploration)
-                if hasattr(self.agent, 'get_cluster_id'):
-                    # Clustered agent
-                    action_idx = self.agent.act(sku_state, sku, explore=False)
-                else:
-                    # Regular agent
-                    action_idx = self.agent.act(sku_state, explore=False)
+                action_idx = self.agent.act(sku_state, explore=False)
                 
                 # Extract forecasts from state
                 forecasts = sku_state[:forecast_dim]
@@ -585,20 +549,14 @@ class ForecastAdjustmentTrainer:
                 sku_state = state[i]
                 
                 # Get action
-                if hasattr(self.agent, 'get_cluster_id'):
-                    action_idx = self.agent.act(sku_state, sku, explore=False)
-                else:
-                    action_idx = self.agent.act(sku_state, explore=False)
+                action_idx = self.agent.act(sku_state, explore=False)
                 
                 # Extract current forecast
                 forecast_dim, _, _ = self.env.get_feature_dims()
                 current_forecast = sku_state[0]  # First forecast
                 
                 # Calculate adjusted forecast
-                if hasattr(self.agent, 'get_cluster_id'):
-                    adjusted_forecast = self.agent.calculate_adjusted_forecast(action_idx, current_forecast, sku)
-                else:
-                    adjusted_forecast = self.agent.calculate_adjusted_forecast(action_idx, current_forecast)
+                adjusted_forecast = self.agent.calculate_adjusted_forecast(action_idx, current_forecast)
                 
                 adjustments[sku] = (action_idx, adjusted_forecast)
             

@@ -24,7 +24,7 @@ class ForecastEnvironment:
         Initialize the forecast adjustment environment.
         
         Args:
-            forecast_data: DataFrame with forecast data (ml_day_X and arima_day_X columns)
+            forecast_data: DataFrame with forecast data (ml_day_X columns)
             historical_data: Optional DataFrame with actual historical values for validation
             validation_length: Number of days to use for validation
             forecast_horizon: Number of days in the forecast horizon
@@ -48,14 +48,12 @@ class ForecastEnvironment:
         self.skus = self.forecast_data['sku_id'].unique().tolist()
         self.logger.info(f"Environment initialized with {len(self.skus)} SKUs")
         
-        # Extract ML and ARIMA forecast columns
+        # Extract ML forecast columns
         self.ml_cols = [col for col in self.forecast_data.columns if col.startswith('ml_day_')]
-        self.arima_cols = [col for col in self.forecast_data.columns if col.startswith('arima_day_')]
         
         # Extract accuracy metrics
         self.accuracy_cols = [
-            'ml_mape_7d', 'ml_mape_30d', 'ml_bias_7d', 'ml_bias_30d',
-            'arima_mape_7d', 'arima_mape_30d', 'arima_bias_7d', 'arima_bias_30d'
+            'ml_mape_7d', 'ml_mape_30d', 'ml_bias_7d', 'ml_bias_30d'
         ]
         
         # Create validation data if historical data is provided
@@ -158,53 +156,6 @@ class ForecastEnvironment:
                     self.validation_data[sku] = np.array(synthetic_actuals)
         
         self.logger.info(f"Validation data prepared for {len(self.validation_data)} SKUs")
-        
-        # If not enough validation data, create synthetic data
-        missing_skus = set(self.skus) - set(self.validation_data.keys())
-        if missing_skus:
-            self.logger.warning(f"Creating synthetic validation data for {len(missing_skus)} SKUs")
-            
-            for sku in missing_skus:
-                # Get forecast data for this SKU
-                sku_forecast = self.forecast_data[self.forecast_data['sku_id'] == sku]
-                
-                if not sku_forecast.empty:
-                    # Extract ML forecasts for the first few days
-                    ml_forecasts = []
-                    for col in self.ml_cols[:self.validation_length]:
-                        if col in sku_forecast.columns:
-                            ml_forecasts.append(sku_forecast[col].iloc[0])
-                        else:
-                            ml_forecasts.append(0)
-                    
-                    # Create synthetic actuals by adding noise to forecasts
-                    if 'ml_mape_7d' in sku_forecast.columns:
-                        mape = sku_forecast['ml_mape_7d'].iloc[0]
-                    else:
-                        mape = 0.2  # Default 20% MAPE
-                        
-                    if 'ml_bias_7d' in sku_forecast.columns:
-                        bias = sku_forecast['ml_bias_7d'].iloc[0]
-                    else:
-                        bias = 0.0  # Default no bias
-                    
-                    # Apply bias and random error based on MAPE
-                    synthetic_actuals = []
-                    for forecast in ml_forecasts[:self.validation_length]:
-                        # Apply bias
-                        biased_forecast = forecast * (1 + bias)
-                        
-                        # Apply random error based on MAPE
-                        error_range = biased_forecast * mape
-                        random_error = np.random.uniform(-error_range, error_range)
-                        
-                        # Final synthetic actual
-                        synthetic_actual = max(0, biased_forecast + random_error)
-                        synthetic_actuals.append(synthetic_actual)
-                    
-                    self.validation_data[sku] = np.array(synthetic_actuals)
-        
-        self.logger.info(f"Validation data prepared for {len(self.validation_data)} SKUs")
     
     def get_feature_dims(self) -> Tuple[int, int, int]:
         """
@@ -245,14 +196,10 @@ class ForecastEnvironment:
             day_idx = step + i
             if day_idx < len(self.ml_cols):
                 ml_col = self.ml_cols[day_idx]
-                arima_col = self.arima_cols[day_idx]
                 
-                # Average ML and ARIMA forecasts
-                if ml_col in sku_forecast.columns and arima_col in sku_forecast.columns:
+                if ml_col in sku_forecast.columns:
                     ml_value = sku_forecast[ml_col].iloc[0]
-                    arima_value = sku_forecast[arima_col].iloc[0]
-                    blended_forecast = (ml_value + arima_value) / 2
-                    forecasts.append(blended_forecast)
+                    forecasts.append(ml_value)
                 else:
                     forecasts.append(0.0)
             else:
@@ -318,12 +265,9 @@ class ForecastEnvironment:
             
             if not sku_forecast.empty and self.current_step < len(self.ml_cols):
                 ml_col = self.ml_cols[self.current_step]
-                arima_col = self.arima_cols[self.current_step]
                 
-                if ml_col in sku_forecast.columns and arima_col in sku_forecast.columns:
-                    ml_forecast = sku_forecast[ml_col].iloc[0]
-                    arima_forecast = sku_forecast[arima_col].iloc[0]
-                    original_forecast = (ml_forecast + arima_forecast) / 2
+                if ml_col in sku_forecast.columns:
+                    original_forecast = sku_forecast[ml_col].iloc[0]
                 else:
                     original_forecast = 0.0
             else:

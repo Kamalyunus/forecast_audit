@@ -7,14 +7,12 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import time
-from datetime import datetime
 import logging
 
 # Import forecast adjustment components
 from forecast_environment import ForecastEnvironment
-from linear_agent import LinearAgent, ClusteredLinearAgent
+from linear_agent import LinearAgent
 from trainer import ForecastAdjustmentTrainer
-from clustering import cluster_skus
 from generate_example_data import generate_forecast_data
 
 
@@ -78,7 +76,7 @@ def generate_sample_data(num_skus=100):
     return forecast_data, historical_data
 
 
-def example_simple_agent():
+def run_simple_example():
     """Example of training a simple linear agent for forecast adjustment."""
     logger = setup_logging()
     logger.info("Running example with simple linear agent for forecast adjustment")
@@ -356,7 +354,7 @@ if __name__ == "__main__":
     choice = input("Enter your choice (1-2): ")
     
     if choice == '1':
-        example_simple_agent()
+        run_simple_example()
     elif choice == '2':
         optimize_for_mape()
     else:

@@ -4,81 +4,15 @@ Main entry point for the forecast adjustment system with linear function approxi
 
 import argparse
 import os
-import json
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from datetime import datetime
 import logging
 import time
 
 from forecast_environment import ForecastEnvironment
-from linear_agent import LinearAgent, ClusteredLinearAgent
+from linear_agent import LinearAgent
 from trainer import ForecastAdjustmentTrainer
-from clustering import cluster_skus
-
-
-def create_agent(env, args, logger):
-    """
-    Create an agent based on command line arguments.
-    
-    Args:
-        env: Environment instance
-        args: Command line arguments
-        logger: Logger instance
-        
-    Returns:
-        Created agent
-    """
-    # Get dimensions from environment
-    forecast_dim, error_dim, feature_dim = env.get_feature_dims()
-    action_size = 7  # [0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3] × forecast
-    
-    # Create clustered or regular agent
-    if args.clustered:
-        logger.info(f"Creating clustered linear agent with {args.num_clusters} clusters")
-        
-        agent = ClusteredLinearAgent(
-            num_clusters=args.num_clusters,
-            feature_dim=feature_dim,
-            action_size=action_size,
-            learning_rate=args.learning_rate,
-            gamma=args.gamma
-        )
-        
-        # Generate cluster mapping
-        logger.info("Clustering SKUs...")
-        cluster_mapping = cluster_skus(
-            forecast_data=env.forecast_data,
-            inventory_data=None,  # Not needed for forecast-only clustering
-            num_clusters=args.num_clusters,
-            logger=logger
-        )
-        
-        # Set cluster mapping in agent
-        agent.set_cluster_mapping(cluster_mapping)
-        
-        # Save cluster mapping
-        mapping_path = os.path.join(args.output_dir, "cluster_mapping.json")
-        with open(mapping_path, 'w') as f:
-            json.dump({str(k): int(v) for k, v in cluster_mapping.items()}, f)
-        logger.info(f"Cluster mapping saved to {mapping_path}")
-        
-    else:
-        logger.info("Creating linear agent")
-        
-        agent = LinearAgent(
-            feature_dim=feature_dim,
-            action_size=action_size,
-            learning_rate=args.learning_rate,
-            gamma=args.gamma,
-            epsilon_start=args.epsilon_start,
-            epsilon_end=args.epsilon_end,
-            epsilon_decay=args.epsilon_decay
-        )
-    
-    return agent
-
 
 def load_data(args, logger):
     """
@@ -116,7 +50,6 @@ def load_data(args, logger):
     
     return forecast_data, historical_data
 
-
 def main():
     """Main function to run the forecast adjustment system."""
     parser = argparse.ArgumentParser(description='Forecast Adjustment System')
@@ -130,8 +63,6 @@ def main():
     parser.add_argument('--historical-file', help='Path to historical sales data CSV')
     
     # Agent options
-    parser.add_argument('--clustered', action='store_true', help='Use clustered linear agent')
-    parser.add_argument('--num-clusters', type=int, default=10, help='Number of clusters for clustered agent')
     parser.add_argument('--learning-rate', type=float, default=0.01, help='Learning rate')
     parser.add_argument('--gamma', type=float, default=0.99, help='Discount factor')
     parser.add_argument('--epsilon-start', type=float, default=1.0, help='Initial exploration rate')
@@ -197,8 +128,21 @@ def main():
     
     # Run in appropriate mode
     if args.mode == 'train':
+        # Get dimensions from environment
+        forecast_dim, error_dim, feature_dim = env.get_feature_dims()
+        action_size = 7  # [0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3] × forecast
+        
         # Create agent
-        agent = create_agent(env, args, logger)
+        logger.info("Creating linear agent")
+        agent = LinearAgent(
+            feature_dim=feature_dim,
+            action_size=action_size,
+            learning_rate=args.learning_rate,
+            gamma=args.gamma,
+            epsilon_start=args.epsilon_start,
+            epsilon_end=args.epsilon_end,
+            epsilon_decay=args.epsilon_decay
+        )
         
         # Create trainer
         trainer = ForecastAdjustmentTrainer(
@@ -238,11 +182,7 @@ def main():
         
         # Load agent
         logger.info(f"Loading model from {args.model_path}")
-        
-        if args.clustered:
-            agent = ClusteredLinearAgent.load(args.model_path)
-        else:
-            agent = LinearAgent.load(args.model_path)
+        agent = LinearAgent.load(args.model_path)
         
         # Create trainer for evaluation
         trainer = ForecastAdjustmentTrainer(
@@ -283,11 +223,7 @@ def main():
         
         # Load agent
         logger.info(f"Loading model from {args.model_path}")
-        
-        if args.clustered:
-            agent = ClusteredLinearAgent.load(args.model_path)
-        else:
-            agent = LinearAgent.load(args.model_path)
+        agent = LinearAgent.load(args.model_path)
         
         # Create trainer for generating adjustments
         trainer = ForecastAdjustmentTrainer(
