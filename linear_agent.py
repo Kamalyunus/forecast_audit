@@ -1,5 +1,5 @@
 """
-Linear Function Approximation Agent for inventory management.
+Linear Function Approximation Agent for forecast adjustment.
 """
 
 import numpy as np
@@ -10,7 +10,8 @@ import os
 
 class LinearAgent:
     """
-    Q-Learning agent with linear function approximation for efficient inventory management.
+    Q-Learning agent with linear function approximation for forecast adjustment.
+    Learns to apply uplift/downlift to system-generated forecasts to improve accuracy.
     """
     
     def __init__(self, 
@@ -26,7 +27,7 @@ class LinearAgent:
         
         Args:
             feature_dim: Dimension of state features
-            action_size: Number of possible actions
+            action_size: Number of possible adjustment actions
             learning_rate: Learning rate for weight updates
             gamma: Discount factor
             epsilon_start: Starting exploration rate
@@ -104,7 +105,7 @@ class LinearAgent:
     
     def act(self, state: np.ndarray, explore: bool = True) -> int:
         """
-        Select an action based on the current state.
+        Select an adjustment action based on the current state.
         
         Args:
             state: Current state features
@@ -223,31 +224,31 @@ class LinearAgent:
         
         return total_error / batch_size
     
-    def calculate_order_quantity(self, action_idx: int, forecast: float,
-                                action_multipliers: List[float] = None) -> int:
+    def calculate_adjusted_forecast(self, action_idx: int, forecast: float,
+                                   adjustment_factors: List[float] = None) -> float:
         """
-        Convert action index to order quantity based on forecast.
+        Apply adjustment to forecast based on the selected action.
         
         Args:
             action_idx: Action index
-            forecast: Forecast value
-            action_multipliers: List of multipliers for each action
+            forecast: Original forecast value
+            adjustment_factors: List of adjustment factors for each action
             
         Returns:
-            Order quantity
+            Adjusted forecast
         """
-        if action_multipliers is None:
-            # Default action multipliers
-            action_multipliers = [0.0, 0.5, 0.8, 1.0, 1.2, 1.5, 2.0]
+        if adjustment_factors is None:
+            # Default adjustment factors range from significant reduction to significant increase
+            adjustment_factors = [0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3]
         
         # Ensure action index is valid
-        action_idx = max(0, min(action_idx, len(action_multipliers) - 1))
+        action_idx = max(0, min(action_idx, len(adjustment_factors) - 1))
         
-        # Apply multiplier to forecast
-        multiplier = action_multipliers[action_idx]
-        order_quantity = int(forecast * multiplier)
+        # Apply factor to forecast
+        factor = adjustment_factors[action_idx]
+        adjusted_forecast = forecast * factor
         
-        return max(0, order_quantity)  # Ensure non-negative
+        return max(0, adjusted_forecast)  # Ensure non-negative
     
     def save(self, filepath: str) -> None:
         """
@@ -331,7 +332,7 @@ class ClusteredLinearAgent:
         Args:
             num_clusters: Number of SKU clusters
             feature_dim: Dimension of state features
-            action_size: Number of possible actions
+            action_size: Number of possible adjustment actions
             learning_rate: Learning rate for weight updates
             gamma: Discount factor
         """
@@ -373,7 +374,7 @@ class ClusteredLinearAgent:
     
     def act(self, state: np.ndarray, sku_id: str, explore: bool = True) -> int:
         """
-        Select an action for the given SKU based on its state.
+        Select an adjustment action for the given SKU based on its state.
         
         Args:
             state: Current state features
@@ -420,26 +421,26 @@ class ClusteredLinearAgent:
             total_error += agent.batch_update(batch_size)
         return total_error / len(self.agents)
     
-    def calculate_order_quantity(self, action_idx: int, forecast: float, 
-                               sku_id: Optional[str] = None) -> int:
+    def calculate_adjusted_forecast(self, action_idx: int, forecast: float, 
+                                  sku_id: Optional[str] = None) -> float:
         """
-        Calculate order quantity based on action and forecast.
+        Calculate adjusted forecast based on action and original forecast.
         
         Args:
             action_idx: Action index
-            forecast: Forecast value
+            forecast: Original forecast value
             sku_id: Optional SKU ID (not used in calculation but included for API consistency)
             
         Returns:
-            Order quantity
+            Adjusted forecast
         """
-        # All clusters use the same action multipliers
-        action_multipliers = [0.0, 0.5, 0.8, 1.0, 1.2, 1.5, 2.0]
-        action_idx = max(0, min(action_idx, len(action_multipliers) - 1))
+        # All clusters use the same adjustment factors
+        adjustment_factors = [0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3]
+        action_idx = max(0, min(action_idx, len(adjustment_factors) - 1))
         
-        multiplier = action_multipliers[action_idx]
-        order_quantity = int(forecast * multiplier)
-        return max(0, order_quantity)
+        factor = adjustment_factors[action_idx]
+        adjusted_forecast = forecast * factor
+        return max(0, adjusted_forecast)
     
     def save(self, base_filepath: str) -> None:
         """

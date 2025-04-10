@@ -1,5 +1,5 @@
 """
-Main entry point for the inventory management system with linear function approximation.
+Main entry point for the forecast adjustment system with linear function approximation.
 """
 
 import argparse
@@ -12,31 +12,27 @@ from datetime import datetime
 import logging
 import time
 
-from inventory_rl.environment.inventory_env import InventoryEnvironment
-from inventory_rl.utils.config import Config, RewardConfig
-from inventory_rl.utils.logger import setup_logger
+from forecast_environment import ForecastEnvironment
 from linear_agent import LinearAgent, ClusteredLinearAgent
-from trainer import Trainer
+from trainer import ForecastAdjustmentTrainer
 from clustering import cluster_skus
 
 
-def create_agent(env, args, config, logger):
+def create_agent(env, args, logger):
     """
     Create an agent based on command line arguments.
     
     Args:
         env: Environment instance
         args: Command line arguments
-        config: Configuration
         logger: Logger instance
         
     Returns:
         Created agent
     """
     # Get dimensions from environment
-    inventory_dim, forecast_dim, demand_dim = env.get_feature_dims()
-    feature_dim = inventory_dim + forecast_dim + demand_dim
-    action_size = 7  # [0, 0.5, 0.8, 1.0, 1.2, 1.5, 2.0] × forecast
+    forecast_dim, error_dim, feature_dim = env.get_feature_dims()
+    action_size = 7  # [0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3] × forecast
     
     # Create clustered or regular agent
     if args.clustered:
@@ -54,7 +50,7 @@ def create_agent(env, args, config, logger):
         logger.info("Clustering SKUs...")
         cluster_mapping = cluster_skus(
             forecast_data=env.forecast_data,
-            inventory_data=env.inventory_data,
+            inventory_data=None,  # Not needed for forecast-only clustering
             num_clusters=args.num_clusters,
             logger=logger
         )
@@ -93,24 +89,11 @@ def load_data(args, logger):
         logger: Logger instance
         
     Returns:
-        Tuple of (inventory_data, forecast_data, price_data, promo_data, weather_data)
+        Tuple of (forecast_data, historical_data)
     """
     # Initialize data containers
-    inventory_data = None
     forecast_data = None
-    price_data = {}
-    promo_data = {}
-    weather_data = {}
-    
-    # Load inventory data
-    logger.info(f"Loading inventory data from {args.inventory_file}")
-    inventory_data = pd.read_csv(args.inventory_file)
-    
-    # Standardize column names
-    if 'product_id' in inventory_data.columns:
-        inventory_data = inventory_data.rename(columns={'product_id': 'sku_id'})
-    if 'on_hand_qty' in inventory_data.columns:
-        inventory_data = inventory_data.rename(columns={'on_hand_qty': 'current_inventory'})
+    historical_data = None
     
     # Load forecast data
     logger.info(f"Loading forecast data from {args.forecast_file}")
@@ -120,82 +103,35 @@ def load_data(args, logger):
     if 'product_id' in forecast_data.columns:
         forecast_data = forecast_data.rename(columns={'product_id': 'sku_id'})
     
-    # Load optional data files
-    if args.price_file and os.path.exists(args.price_file):
-        logger.info(f"Loading price data from {args.price_file}")
-        price_df = pd.read_csv(args.price_file)
+    # Load historical data if available
+    if args.historical_file and os.path.exists(args.historical_file):
+        logger.info(f"Loading historical data from {args.historical_file}")
+        historical_data = pd.read_csv(args.historical_file)
         
         # Standardize column names
-        if 'product_id' in price_df.columns:
-            price_df = price_df.rename(columns={'product_id': 'sku_id'})
-        if 'date' in price_df.columns:
-            price_df = price_df.rename(columns={'date': 'price_date'})
-        
-        # Convert date to datetime
-        price_df['price_date'] = pd.to_datetime(price_df['price_date'])
-        
-        # Create price dictionary
-        for _, row in price_df.iterrows():
-            price_data[(row['sku_id'], row['price_date'].to_pydatetime())] = row['price']
+        if 'product_id' in historical_data.columns:
+            historical_data = historical_data.rename(columns={'product_id': 'sku_id'})
+        if 'date' in historical_data.columns:
+            historical_data = historical_data.rename(columns={'date': 'sale_date'})
     
-    if args.promo_file and os.path.exists(args.promo_file):
-        logger.info(f"Loading promotion data from {args.promo_file}")
-        promo_df = pd.read_csv(args.promo_file)
-        
-        # Standardize column names
-        if 'product_id' in promo_df.columns:
-            promo_df = promo_df.rename(columns={'product_id': 'sku_id'})
-        if 'date' in promo_df.columns:
-            promo_df = promo_df.rename(columns={'date': 'promo_date'})
-        
-        # Convert date to datetime
-        promo_df['promo_date'] = pd.to_datetime(promo_df['promo_date'])
-        
-        # Create promotion dictionary
-        for _, row in promo_df.iterrows():
-            promo_info = {
-                'type': row.get('promo_type', 0),
-                'discount': row.get('discount', 0.0)
-            }
-            promo_data[(row['sku_id'], row['promo_date'].to_pydatetime())] = promo_info
-    
-    if args.weather_file and os.path.exists(args.weather_file):
-        logger.info(f"Loading weather data from {args.weather_file}")
-        weather_df = pd.read_csv(args.weather_file)
-        
-        # Convert date to datetime
-        weather_df['date'] = pd.to_datetime(weather_df['date'])
-        
-        # Create weather dictionary
-        for _, row in weather_df.iterrows():
-            weather_info = {
-                'high_temp': row.get('high_temp', 70),
-                'low_temp': row.get('low_temp', 50),
-                'precip_prob': row.get('precip_prob', 0.0)
-            }
-            weather_data[row['date'].to_pydatetime()] = weather_info
-    
-    return inventory_data, forecast_data, price_data, promo_data, weather_data
+    return forecast_data, historical_data
 
 
 def main():
-    """Main function to run the inventory management system."""
-    parser = argparse.ArgumentParser(description='Inventory Management System')
+    """Main function to run the forecast adjustment system."""
+    parser = argparse.ArgumentParser(description='Forecast Adjustment System')
     
     # Mode selection
-    parser.add_argument('--mode', choices=['train', 'evaluate', 'predict'], 
+    parser.add_argument('--mode', choices=['train', 'evaluate', 'adjust'], 
                        default='train', help='Operation mode')
     
     # Data options
-    parser.add_argument('--inventory-file', required=True, help='Path to inventory data CSV')
     parser.add_argument('--forecast-file', required=True, help='Path to forecast data CSV')
-    parser.add_argument('--price-file', help='Path to price data CSV')
-    parser.add_argument('--promo-file', help='Path to promotion data CSV')
-    parser.add_argument('--weather-file', help='Path to weather data CSV')
+    parser.add_argument('--historical-file', help='Path to historical sales data CSV')
     
     # Agent options
     parser.add_argument('--clustered', action='store_true', help='Use clustered linear agent')
-    parser.add_argument('--num-clusters', type=int, default=20, help='Number of clusters for clustered agent')
+    parser.add_argument('--num-clusters', type=int, default=10, help='Number of clusters for clustered agent')
     parser.add_argument('--learning-rate', type=float, default=0.01, help='Learning rate')
     parser.add_argument('--gamma', type=float, default=0.99, help='Discount factor')
     parser.add_argument('--epsilon-start', type=float, default=1.0, help='Initial exploration rate')
@@ -208,35 +144,34 @@ def main():
     parser.add_argument('--max-steps', type=int, default=14, help='Maximum steps per episode')
     parser.add_argument('--save-every', type=int, default=50, help='Save model every N episodes')
     
-    # Reward options
-    parser.add_argument('--oos-factor', type=float, default=3.0, help='Out-of-stock penalty factor')
-    parser.add_argument('--waste-factor', type=float, default=1.0, help='Waste penalty factor')
+    # Forecast options
+    parser.add_argument('--optimize-for', choices=['mape', 'bias', 'both'], default='both',
+                       help='Which metric to optimize for')
+    parser.add_argument('--validation-length', type=int, default=30, 
+                       help='Number of days to use for validation')
+    parser.add_argument('--forecast-horizon', type=int, default=7,
+                       help='Number of days in the forecast horizon')
     
     # Model options
     parser.add_argument('--model-path', help='Path to saved model')
     parser.add_argument('--output-dir', default='output', help='Directory for outputs')
     
-    # Config options
-    parser.add_argument('--config-file', help='Path to configuration file')
+    # Other options
     parser.add_argument('--random-seed', type=int, help='Random seed for reproducibility')
     
     args = parser.parse_args()
     
     # Set up logger
     os.makedirs(args.output_dir, exist_ok=True)
-    logger = setup_logger("main", log_dir=args.output_dir)
-    
-    # Load configuration
-    config = Config()
-    if args.config_file and os.path.exists(args.config_file):
-        config = Config.load(args.config_file)
-        logger.info(f"Loaded configuration from {args.config_file}")
-    
-    # Update reward config from args
-    config.reward = RewardConfig(
-        oos_penalty_factor=args.oos_factor,
-        waste_penalty_factor=args.waste_factor
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(os.path.join(args.output_dir, 'forecast_adjustment.log')),
+            logging.StreamHandler()
+        ]
     )
+    logger = logging.getLogger("ForecastAdjustment")
     
     # Set random seed
     if args.random_seed is not None:
@@ -244,18 +179,17 @@ def main():
         logger.info(f"Random seed set to {args.random_seed}")
     
     # Load data
-    inventory_data, forecast_data, price_data, promo_data, weather_data = load_data(args, logger)
+    forecast_data, historical_data = load_data(args, logger)
     
     # Create environment
-    logger.info("Creating environment")
-    env = InventoryEnvironment(
-        inventory_data=inventory_data,
+    logger.info("Creating forecast environment")
+    env = ForecastEnvironment(
         forecast_data=forecast_data,
-        price_data=price_data,
-        promotion_data=promo_data,
-        weather_data=weather_data,
-        env_config=config.environment,
-        reward_config=config.reward
+        historical_data=historical_data,
+        validation_length=args.validation_length,
+        forecast_horizon=args.forecast_horizon,
+        optimize_for=args.optimize_for,
+        logger=logger
     )
     
     # Display environment stats
@@ -264,10 +198,10 @@ def main():
     # Run in appropriate mode
     if args.mode == 'train':
         # Create agent
-        agent = create_agent(env, args, config, logger)
+        agent = create_agent(env, args, logger)
         
         # Create trainer
-        trainer = Trainer(
+        trainer = ForecastAdjustmentTrainer(
             agent=agent,
             environment=env,
             output_dir=args.output_dir,
@@ -275,6 +209,7 @@ def main():
             max_steps=args.max_steps,
             batch_size=args.batch_size,
             save_every=args.save_every,
+            optimize_for=args.optimize_for,
             logger=logger
         )
         
@@ -288,8 +223,8 @@ def main():
         logger.info(f"Training completed in {training_time:.2f} seconds")
         logger.info(f"Final metrics:")
         logger.info(f"  Average Score (last 100): {np.mean(metrics['scores'][-100:]):.2f}")
-        logger.info(f"  Average Service Level (last 100): {np.mean(metrics['service_levels'][-100:]):.4f}")
-        logger.info(f"  Average Waste Percentage (last 100): {np.mean(metrics['waste_percentages'][-100:]):.4f}")
+        logger.info(f"  Average MAPE Improvement (last 100): {np.mean(metrics['mape_improvements'][-100:]):.4f}")
+        logger.info(f"  Average Bias Improvement (last 100): {np.mean(metrics['bias_improvements'][-100:]):.4f}")
         
     elif args.mode == 'evaluate':
         # Check if model path is provided
@@ -310,10 +245,11 @@ def main():
             agent = LinearAgent.load(args.model_path)
         
         # Create trainer for evaluation
-        trainer = Trainer(
+        trainer = ForecastAdjustmentTrainer(
             agent=agent,
             environment=env,
             output_dir=args.output_dir,
+            optimize_for=args.optimize_for,
             logger=logger
         )
         
@@ -325,13 +261,20 @@ def main():
         logger.info(f"Evaluation completed")
         logger.info(f"Metrics:")
         logger.info(f"  Average Score: {eval_metrics['avg_score']:.2f}")
-        logger.info(f"  Average Service Level: {eval_metrics['avg_service_level']:.4f}")
-        logger.info(f"  Average Waste Percentage: {eval_metrics['avg_waste_percentage']:.4f}")
+        logger.info(f"  Average MAPE Improvement: {eval_metrics['avg_mape_improvement']:.4f}")
+        logger.info(f"  Average Bias Improvement: {eval_metrics['avg_bias_improvement']:.4f}")
         
-    elif args.mode == 'predict':
+        # Log top performing SKUs
+        logger.info("Top performing SKUs (by combined improvement):")
+        for i, (sku, metrics) in enumerate(eval_metrics['top_skus'][:10]):
+            logger.info(f"  {i+1}. {sku}: MAPE Imp = {metrics['mape_improvement']:.4f}, " 
+                     f"Bias Imp = {metrics['bias_improvement']:.4f}, "
+                     f"Common Adjustment = {metrics['common_adjustment']:.2f}x")
+        
+    elif args.mode == 'adjust':
         # Check if model path is provided
         if not args.model_path:
-            logger.error("Model path must be provided for prediction mode")
+            logger.error("Model path must be provided for adjustment mode")
             return
         
         if not os.path.exists(args.model_path):
@@ -346,68 +289,86 @@ def main():
         else:
             agent = LinearAgent.load(args.model_path)
         
-        # Create trainer for prediction
-        trainer = Trainer(
+        # Create trainer for generating adjustments
+        trainer = ForecastAdjustmentTrainer(
             agent=agent,
             environment=env,
             output_dir=args.output_dir,
+            optimize_for=args.optimize_for,
             logger=logger
         )
         
-        # Generate predictions
-        logger.info("Generating order predictions")
-        predictions = trainer.predict_orders(num_days=14)
+        # Generate adjusted forecasts
+        logger.info("Generating adjusted forecasts")
+        adjustments = trainer.generate_adjusted_forecasts(num_days=args.max_steps)
         
-        # Save predictions
-        predictions_path = os.path.join(args.output_dir, "order_predictions.csv")
-        predictions.to_csv(predictions_path, index=False)
-        logger.info(f"Predictions saved to {predictions_path}")
+        # Save adjustments
+        adjustments_path = os.path.join(args.output_dir, "adjusted_forecasts.csv")
+        adjustments.to_csv(adjustments_path, index=False)
+        logger.info(f"Adjusted forecasts saved to {adjustments_path}")
         
         # Log summary
-        logger.info(f"Prediction summary:")
-        logger.info(f"  Total SKUs: {predictions['sku_id'].nunique()}")
-        logger.info(f"  Total days: {predictions['day'].nunique()}")
-        logger.info(f"  Total order quantity: {predictions['order_quantity'].sum()}")
+        logger.info(f"Adjustment summary:")
+        logger.info(f"  Total SKUs: {adjustments['sku_id'].nunique()}")
+        logger.info(f"  Total days: {adjustments['day'].nunique()}")
+        
+        # Calculate average adjustment by factor
+        action_counts = adjustments['action_idx'].value_counts().sort_index()
+        adjustment_factors = [0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3]
+        
+        for action_idx, count in action_counts.items():
+            percentage = count / len(adjustments) * 100
+            factor = adjustment_factors[action_idx] if action_idx < len(adjustment_factors) else 1.0
+            logger.info(f"  Factor {factor:.1f}x: {percentage:.1f}% of adjustments")
         
         # Create summary plots
         plt.figure(figsize=(12, 10))
         
-        # Average order quantity by day
+        # Distribution of adjustment factors
         plt.subplot(2, 2, 1)
-        day_orders = predictions.groupby('day')['order_quantity'].mean()
-        plt.bar(day_orders.index, day_orders.values)
-        plt.title('Average Order Quantity by Day')
-        plt.xlabel('Day')
-        plt.ylabel('Quantity')
-        
-        # Action distribution
-        plt.subplot(2, 2, 2)
-        action_counts = predictions['action_idx'].value_counts().sort_index()
-        action_labels = ['0x', '0.5x', '0.8x', '1.0x', '1.2x', '1.5x', '2.0x']
-        plt.bar([action_labels[i] for i in action_counts.index], action_counts.values)
-        plt.title('Action Distribution')
-        plt.xlabel('Action Multiplier')
+        factor_labels = [f"{f:.1f}x" for f in adjustment_factors]
+        counts = [action_counts.get(i, 0) for i in range(len(adjustment_factors))]
+        plt.bar(factor_labels, counts)
+        plt.title('Adjustment Factor Distribution')
         plt.ylabel('Count')
         
-        # Order quantity vs forecast
-        plt.subplot(2, 2, 3)
-        plt.scatter(predictions['blended_forecast'], predictions['order_quantity'], alpha=0.3)
-        plt.title('Order Quantity vs Forecast')
-        plt.xlabel('Blended Forecast')
-        plt.ylabel('Order Quantity')
+        # Average adjustment by day
+        plt.subplot(2, 2, 2)
+        day_factors = adjustments.groupby('day')['adjustment_factor'].mean()
+        plt.plot(day_factors.index, day_factors.values, 'o-')
+        plt.title('Average Adjustment Factor by Day')
+        plt.xlabel('Day')
+        plt.ylabel('Avg Factor')
         plt.grid(True, alpha=0.3)
         
-        # Lead time distribution
+        # Original vs Adjusted Forecast scatter
+        plt.subplot(2, 2, 3)
+        plt.scatter(adjustments['original_forecast'], 
+                   adjustments['adjusted_forecast'], 
+                   alpha=0.3)
+        max_val = max(adjustments['original_forecast'].max(), 
+                      adjustments['adjusted_forecast'].max())
+        plt.plot([0, max_val], [0, max_val], 'r--')  # Diagonal line
+        plt.title('Original vs Adjusted Forecast')
+        plt.xlabel('Original Forecast')
+        plt.ylabel('Adjusted Forecast')
+        plt.grid(True, alpha=0.3)
+        
+        # Adjustment percentage distribution
         plt.subplot(2, 2, 4)
-        lead_time_counts = predictions['lead_time'].value_counts().sort_index()
-        plt.bar(lead_time_counts.index, lead_time_counts.values)
-        plt.title('Lead Time Distribution')
-        plt.xlabel('Lead Time (days)')
+        # Calculate percentage adjustments
+        pct_changes = ((adjustments['adjusted_forecast'] - adjustments['original_forecast']) 
+                      / adjustments['original_forecast'].clip(lower=1e-8)) * 100
+        # Remove extreme values for better visualization
+        pct_changes = pct_changes.clip(lower=-50, upper=50)
+        plt.hist(pct_changes, bins=20)
+        plt.title('Adjustment Percentage Distribution')
+        plt.xlabel('Adjustment (%)')
         plt.ylabel('Count')
         
         plt.tight_layout()
-        plt.savefig(os.path.join(args.output_dir, "prediction_summary.png"))
-        logger.info(f"Summary plots saved to {os.path.join(args.output_dir, 'prediction_summary.png')}")
+        plt.savefig(os.path.join(args.output_dir, "adjustment_summary.png"))
+        logger.info(f"Summary plots saved to {os.path.join(args.output_dir, 'adjustment_summary.png')}")
     
     logger.info("Operation completed successfully")
 

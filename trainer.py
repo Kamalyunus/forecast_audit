@@ -1,5 +1,5 @@
 """
-Training and evaluation logic for Linear Agent inventory management.
+Training and evaluation logic for forecast adjustment using Linear Agent.
 """
 
 import numpy as np
@@ -12,9 +12,9 @@ import logging
 from tqdm import tqdm
 
 
-class Trainer:
+class ForecastAdjustmentTrainer:
     """
-    Trainer for Linear Agent inventory management.
+    Trainer for forecast adjustment using Linear Agent.
     """
     
     def __init__(self, 
@@ -25,18 +25,20 @@ class Trainer:
                 max_steps: int = 14,
                 batch_size: int = 32,
                 save_every: int = 50,
+                optimize_for: str = "both",  # "mape", "bias", or "both"
                 logger: Optional[logging.Logger] = None):
         """
         Initialize trainer.
         
         Args:
             agent: LinearAgent or ClusteredLinearAgent
-            environment: Inventory environment
+            environment: Forecast environment
             output_dir: Directory for outputs
             num_episodes: Number of episodes to train
             max_steps: Maximum steps per episode
             batch_size: Batch size for updates
             save_every: How often to save the model
+            optimize_for: Which metric to optimize for ("mape", "bias", or "both")
             logger: Logger instance
         """
         self.agent = agent
@@ -46,11 +48,12 @@ class Trainer:
         self.max_steps = max_steps
         self.batch_size = batch_size
         self.save_every = save_every
+        self.optimize_for = optimize_for
         
         # Set up logger
         if logger is None:
             logging.basicConfig(level=logging.INFO)
-            self.logger = logging.getLogger("Trainer")
+            self.logger = logging.getLogger("ForecastAdjustmentTrainer")
         else:
             self.logger = logger
             
@@ -63,13 +66,16 @@ class Trainer:
         
         # Metrics
         self.scores = []
-        self.service_levels = []
-        self.waste_percentages = []
+        self.mape_improvements = []
+        self.bias_improvements = []
         self.training_time = 0
+        
+        # Adjustment factors
+        self.adjustment_factors = [0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3]
         
     def train(self, verbose: bool = True) -> Dict:
         """
-        Train the linear agent.
+        Train the agent for forecast adjustment.
         
         Args:
             verbose: Whether to print progress
@@ -82,7 +88,8 @@ class Trainer:
         
         # Track best metrics for model saving
         best_score = float('-inf')
-        best_service_level = 0.0
+        best_mape_improvement = 0.0
+        best_bias_improvement = 0.0
         
         # Training loop
         for episode in tqdm(range(1, self.num_episodes + 1), disable=not verbose):
@@ -91,17 +98,18 @@ class Trainer:
             episode_td_errors = []
             
             # Metrics for this episode
-            sku_sales = {sku: 0 for sku in self.env.skus}
-            sku_stockouts = {sku: 0 for sku in self.env.skus}
-            sku_waste = {sku: 0 for sku in self.env.skus}
+            sku_original_mape = {sku: 0 for sku in self.env.skus}
+            sku_adjusted_mape = {sku: 0 for sku in self.env.skus}
+            sku_original_bias = {sku: 0 for sku in self.env.skus}
+            sku_adjusted_bias = {sku: 0 for sku in self.env.skus}
             
             for step in range(self.max_steps):
-                actions = {}
+                adjustments = {}
                 
-                # Determine actions for all SKUs
+                # Determine adjustments for all SKUs
                 for i, sku in enumerate(self.env.skus):
                     # Extract state components
-                    inventory_dim, forecast_dim, demand_dim = self.env.get_feature_dims()
+                    forecast_dim, error_dim, feature_dim = self.env.get_feature_dims()
                     
                     # State features for this SKU
                     sku_state = state[i]
@@ -114,51 +122,36 @@ class Trainer:
                         # Regular agent
                         action_idx = self.agent.act(sku_state)
                     
-                    # Calculate order quantity based on forecast
-                    # Extract forecasts
-                    forecast_features = sku_state[inventory_dim:inventory_dim+forecast_dim]
-                    lead_time = np.random.randint(2, 4)  # 2-3 day lead time
-                    forecast_idx = min(lead_time, forecast_dim // 2 - 1)
+                    # Extract forecast from state
+                    forecasts = sku_state[:forecast_dim]
+                    current_forecast = forecasts[0]  # Current day's forecast
                     
-                    # Get ML and ARIMA forecasts
-                    ml_forecast = forecast_features[forecast_idx]
-                    arima_forecast = forecast_features[forecast_idx + forecast_dim // 2]
+                    # Calculate adjusted forecast based on action
+                    if hasattr(self.agent, 'get_cluster_id'):
+                        adjusted_forecast = self.agent.calculate_adjusted_forecast(action_idx, current_forecast, sku)
+                    else:
+                        adjusted_forecast = self.agent.calculate_adjusted_forecast(action_idx, current_forecast)
                     
-                    # Blend forecasts (simple average)
-                    blended_forecast = (ml_forecast + arima_forecast) / 2
-                    
-                    # Calculate order using action multipliers
-                    action_multipliers = [0.0, 0.5, 0.8, 1.0, 1.2, 1.5, 2.0]
-                    order_quantity = int(blended_forecast * action_multipliers[action_idx])
-                    actions[sku] = order_quantity
+                    adjustments[sku] = (action_idx, adjusted_forecast)
                 
                 # Take step in environment
-                next_state, rewards, done, info = self.env.step(actions)
+                next_state, rewards, done, info = self.env.step(adjustments)
                 
                 # Update episode metrics
                 episode_score += sum(rewards.values())
                 
                 # Update per-SKU metrics
                 for sku in self.env.skus:
-                    sku_sales[sku] += info['sales'][sku] - sku_sales[sku]
-                    sku_stockouts[sku] += info['stockouts'][sku] - sku_stockouts[sku]
-                    sku_waste[sku] += info['waste'][sku] - sku_waste[sku]
+                    sku_original_mape[sku] = info['original_mape'][sku]
+                    sku_adjusted_mape[sku] = info['adjusted_mape'][sku]
+                    sku_original_bias[sku] = info['original_bias'][sku]
+                    sku_adjusted_bias[sku] = info['adjusted_bias'][sku]
                 
                 # Update agent for each SKU
                 for i, sku in enumerate(self.env.skus):
                     sku_state = state[i]
                     next_sku_state = next_state[i]
-                    
-                    # Determine action index that was taken
-                    action_idx = np.argmax([
-                        int(actions[sku] == 0), 
-                        int(actions[sku] > 0 and actions[sku] < ml_forecast * 0.7),
-                        int(actions[sku] >= ml_forecast * 0.7 and actions[sku] < ml_forecast * 0.9),
-                        int(actions[sku] >= ml_forecast * 0.9 and actions[sku] < ml_forecast * 1.1),
-                        int(actions[sku] >= ml_forecast * 1.1 and actions[sku] < ml_forecast * 1.3),
-                        int(actions[sku] >= ml_forecast * 1.3 and actions[sku] < ml_forecast * 1.8),
-                        int(actions[sku] >= ml_forecast * 1.8)
-                    ])
+                    action_idx, _ = adjustments[sku]
                     
                     # Update agent
                     if hasattr(self.agent, 'update'):
@@ -180,30 +173,32 @@ class Trainer:
                 if done:
                     break
             
-            # Calculate service level and waste percentage
-            total_demand = sum(sku_sales.values()) + sum(sku_stockouts.values())
-            service_level = sum(sku_sales.values()) / total_demand if total_demand > 0 else 0
+            # Calculate MAPE and bias improvements
+            avg_original_mape = np.mean(list(sku_original_mape.values()))
+            avg_adjusted_mape = np.mean(list(sku_adjusted_mape.values()))
+            avg_original_bias = np.mean([abs(b) for b in sku_original_bias.values()])
+            avg_adjusted_bias = np.mean([abs(b) for b in sku_adjusted_bias.values()])
             
-            total_handled = sum(sku_sales.values()) + sum(sku_waste.values())
-            waste_percentage = sum(sku_waste.values()) / total_handled if total_handled > 0 else 0
+            mape_improvement = (avg_original_mape - avg_adjusted_mape) / avg_original_mape if avg_original_mape > 0 else 0
+            bias_improvement = (avg_original_bias - avg_adjusted_bias) / avg_original_bias if avg_original_bias > 0 else 0
             
             # Store metrics
             self.scores.append(episode_score)
-            self.service_levels.append(service_level)
-            self.waste_percentages.append(waste_percentage)
+            self.mape_improvements.append(mape_improvement)
+            self.bias_improvements.append(bias_improvement)
             
             # Log progress
             if verbose and (episode % 10 == 0 or episode == 1):
                 avg_score = np.mean(self.scores[-100:]) if len(self.scores) >= 100 else np.mean(self.scores)
-                avg_service = np.mean(self.service_levels[-100:]) if len(self.service_levels) >= 100 else np.mean(self.service_levels)
-                avg_waste = np.mean(self.waste_percentages[-100:]) if len(self.waste_percentages) >= 100 else np.mean(self.waste_percentages)
+                avg_mape_imp = np.mean(self.mape_improvements[-100:]) if len(self.mape_improvements) >= 100 else np.mean(self.mape_improvements)
+                avg_bias_imp = np.mean(self.bias_improvements[-100:]) if len(self.bias_improvements) >= 100 else np.mean(self.bias_improvements)
                 avg_td_error = np.mean(episode_td_errors) if episode_td_errors else 0
                 
                 self.logger.info(f"Episode {episode}/{self.num_episodes} | "
                               f"Score: {episode_score:.2f} | "
                               f"Avg Score: {avg_score:.2f} | "
-                              f"Service: {service_level:.4f} | "
-                              f"Waste: {waste_percentage:.4f} | "
+                              f"MAPE Imp: {mape_improvement:.4f} | "
+                              f"Bias Imp: {bias_improvement:.4f} | "
                               f"TD Error: {avg_td_error:.4f}")
             
             # Save models periodically
@@ -220,10 +215,15 @@ class Trainer:
                 best_model_path = os.path.join(self.model_dir, "best_score_model.pkl")
                 self.agent.save(best_model_path)
                 
-            if service_level > best_service_level:
-                best_service_level = service_level
-                best_sl_model_path = os.path.join(self.model_dir, "best_service_model.pkl")
-                self.agent.save(best_sl_model_path)
+            if mape_improvement > best_mape_improvement:
+                best_mape_improvement = mape_improvement
+                best_mape_model_path = os.path.join(self.model_dir, "best_mape_model.pkl")
+                self.agent.save(best_mape_model_path)
+                
+            if bias_improvement > best_bias_improvement:
+                best_bias_improvement = bias_improvement
+                best_bias_model_path = os.path.join(self.model_dir, "best_bias_model.pkl")
+                self.agent.save(best_bias_model_path)
         
         # Final save
         final_model_path = os.path.join(self.model_dir, "final_model.pkl")
@@ -239,11 +239,12 @@ class Trainer:
         # Return metrics
         metrics = {
             'scores': self.scores,
-            'service_levels': self.service_levels,
-            'waste_percentages': self.waste_percentages,
+            'mape_improvements': self.mape_improvements,
+            'bias_improvements': self.bias_improvements,
             'training_time': self.training_time,
             'best_score': best_score,
-            'best_service_level': best_service_level,
+            'best_mape_improvement': best_mape_improvement,
+            'best_bias_improvement': best_bias_improvement,
             'final_model_path': final_model_path
         }
         
@@ -265,32 +266,40 @@ class Trainer:
             moving_avg = np.convolve(self.scores, np.ones(10)/10, mode='valid')
             plt.plot(range(9, len(self.scores)), moving_avg, 'r-')
         
-        # Plot service level
+        # Plot MAPE improvement
         plt.subplot(2, 2, 2)
-        plt.plot(self.service_levels)
-        plt.title('Service Level')
+        plt.plot(self.mape_improvements)
+        plt.title('MAPE Improvement')
         plt.xlabel('Episode')
-        plt.ylabel('Service Level')
-        plt.ylim([0, 1])
+        plt.ylabel('Improvement Ratio')
         
-        # Plot waste percentage
+        # Plot bias improvement
         plt.subplot(2, 2, 3)
-        plt.plot(self.waste_percentages)
-        plt.title('Waste Percentage')
+        plt.plot(self.bias_improvements)
+        plt.title('Bias Improvement')
         plt.xlabel('Episode')
-        plt.ylabel('Waste %')
-        plt.ylim([0, 1])
+        plt.ylabel('Improvement Ratio')
         
-        # Plot service level vs waste (last 100 episodes)
+        # Plot action distribution (last 100 episodes)
         plt.subplot(2, 2, 4)
-        if len(self.service_levels) > 100:
-            plt.scatter(self.service_levels[-100:], self.waste_percentages[-100:], alpha=0.7)
+        
+        if hasattr(self.agent, 'agents'):
+            # Clustered agent - aggregate across clusters
+            action_counts = np.zeros(self.agent.action_size)
+            for cluster_agent in self.agent.agents:
+                action_counts += cluster_agent.action_counts
         else:
-            plt.scatter(self.service_levels, self.waste_percentages, alpha=0.7)
-        plt.title('Service Level vs Waste Trade-off')
-        plt.xlabel('Service Level')
-        plt.ylabel('Waste %')
-        plt.grid(True, alpha=0.3)
+            # Regular agent
+            action_counts = self.agent.action_counts
+            
+        total_actions = np.sum(action_counts)
+        if total_actions > 0:
+            action_distribution = action_counts / total_actions
+            labels = [f"{factor:.1f}x" for factor in self.adjustment_factors]
+            plt.bar(labels, action_distribution)
+            plt.title('Adjustment Factor Distribution')
+            plt.xlabel('Adjustment Factor')
+            plt.ylabel('Frequency')
         
         plt.tight_layout()
         plt.savefig(os.path.join(self.log_dir, 'training_progress.png'))
@@ -298,7 +307,7 @@ class Trainer:
     
     def evaluate(self, num_episodes: int = 10, verbose: bool = True) -> Dict:
         """
-        Evaluate the linear agent.
+        Evaluate the forecast adjustment agent.
         
         Args:
             num_episodes: Number of episodes to evaluate
@@ -311,8 +320,19 @@ class Trainer:
         
         # Evaluation metrics
         eval_scores = []
-        eval_service_levels = []
-        eval_waste_percentages = []
+        eval_mape_improvements = []
+        eval_bias_improvements = []
+        sku_level_metrics = {}
+        
+        # Initialize SKU-level metrics tracking
+        for sku in self.env.skus:
+            sku_level_metrics[sku] = {
+                "original_mape": [],
+                "adjusted_mape": [],
+                "original_bias": [],
+                "adjusted_bias": [],
+                "actions": []
+            }
         
         # Evaluation loop
         for episode in tqdm(range(1, num_episodes + 1), disable=not verbose):
@@ -320,12 +340,12 @@ class Trainer:
             episode_score = 0
             
             for step in range(self.max_steps):
-                actions = {}
+                adjustments = {}
                 
-                # Determine actions for all SKUs (no exploration)
+                # Determine adjustments for all SKUs (no exploration)
                 for i, sku in enumerate(self.env.skus):
                     # Extract state components
-                    inventory_dim, forecast_dim, demand_dim = self.env.get_feature_dims()
+                    forecast_dim, error_dim, feature_dim = self.env.get_feature_dims()
                     
                     # State features for this SKU
                     sku_state = state[i]
@@ -338,27 +358,33 @@ class Trainer:
                         # Regular agent
                         action_idx = self.agent.act(sku_state, explore=False)
                     
-                    # Extract forecasts
-                    forecast_features = sku_state[inventory_dim:inventory_dim+forecast_dim]
-                    lead_time = min(step + 3, forecast_dim // 2 - 1)
+                    # Extract forecast from state
+                    forecasts = sku_state[:forecast_dim]
+                    current_forecast = forecasts[0]  # Current day's forecast
                     
-                    # Get ML and ARIMA forecasts
-                    ml_forecast = forecast_features[lead_time]
-                    arima_forecast = forecast_features[lead_time + forecast_dim // 2]
+                    # Calculate adjusted forecast based on action
+                    if hasattr(self.agent, 'get_cluster_id'):
+                        adjusted_forecast = self.agent.calculate_adjusted_forecast(action_idx, current_forecast, sku)
+                    else:
+                        adjusted_forecast = self.agent.calculate_adjusted_forecast(action_idx, current_forecast)
                     
-                    # Blend forecasts
-                    blended_forecast = (ml_forecast + arima_forecast) / 2
+                    adjustments[sku] = (action_idx, adjusted_forecast)
                     
-                    # Calculate order using action multipliers
-                    action_multipliers = [0.0, 0.5, 0.8, 1.0, 1.2, 1.5, 2.0]
-                    order_quantity = int(blended_forecast * action_multipliers[action_idx])
-                    actions[sku] = order_quantity
+                    # Track actions for SKU
+                    sku_level_metrics[sku]["actions"].append(action_idx)
                 
                 # Take step in environment
-                next_state, rewards, done, info = self.env.step(actions)
+                next_state, rewards, done, info = self.env.step(adjustments)
                 
                 # Update episode metrics
                 episode_score += sum(rewards.values())
+                
+                # Update SKU-level metrics
+                for sku in self.env.skus:
+                    sku_level_metrics[sku]["original_mape"].append(info['original_mape'][sku])
+                    sku_level_metrics[sku]["adjusted_mape"].append(info['adjusted_mape'][sku])
+                    sku_level_metrics[sku]["original_bias"].append(info['original_bias'][sku])
+                    sku_level_metrics[sku]["adjusted_bias"].append(info['adjusted_bias'][sku])
                 
                 # Update state
                 state = next_state
@@ -366,69 +392,158 @@ class Trainer:
                 if done:
                     break
             
-            # Calculate service level and waste percentage
-            total_demand = sum(info['sales'].values()) + sum(info['stockouts'].values())
-            service_level = sum(info['sales'].values()) / total_demand if total_demand > 0 else 0
+            # Calculate episode improvements
+            original_mape = np.mean([info['original_mape'][sku] for sku in info['original_mape']])
+            adjusted_mape = np.mean([info['adjusted_mape'][sku] for sku in info['adjusted_mape']])
+            original_bias = np.mean([abs(info['original_bias'][sku]) for sku in info['original_bias']])
+            adjusted_bias = np.mean([abs(info['adjusted_bias'][sku]) for sku in info['adjusted_bias']])
             
-            total_handled = sum(info['sales'].values()) + sum(info['waste'].values())
-            waste_percentage = sum(info['waste'].values()) / total_handled if total_handled > 0 else 0
+            mape_improvement = (original_mape - adjusted_mape) / original_mape if original_mape > 0 else 0
+            bias_improvement = (original_bias - adjusted_bias) / original_bias if original_bias > 0 else 0
             
             # Store metrics
             eval_scores.append(episode_score)
-            eval_service_levels.append(service_level)
-            eval_waste_percentages.append(waste_percentage)
+            eval_mape_improvements.append(mape_improvement)
+            eval_bias_improvements.append(bias_improvement)
             
             if verbose:
                 self.logger.info(f"Eval Episode {episode}/{num_episodes} | "
                               f"Score: {episode_score:.2f} | "
-                              f"Service: {service_level:.4f} | "
-                              f"Waste: {waste_percentage:.4f}")
+                              f"MAPE Imp: {mape_improvement:.4f} | "
+                              f"Bias Imp: {bias_improvement:.4f}")
         
         # Calculate aggregate metrics
         avg_score = np.mean(eval_scores)
-        avg_service_level = np.mean(eval_service_levels)
-        avg_waste_percentage = np.mean(eval_waste_percentages)
+        avg_mape_improvement = np.mean(eval_mape_improvements)
+        avg_bias_improvement = np.mean(eval_bias_improvements)
+        
+        # Calculate SKU-level summary
+        sku_summary = {}
+        for sku in self.env.skus:
+            orig_mape = np.mean(sku_level_metrics[sku]["original_mape"])
+            adj_mape = np.mean(sku_level_metrics[sku]["adjusted_mape"])
+            orig_bias = np.mean([abs(b) for b in sku_level_metrics[sku]["original_bias"]])
+            adj_bias = np.mean([abs(b) for b in sku_level_metrics[sku]["adjusted_bias"]])
+            
+            mape_imp = (orig_mape - adj_mape) / orig_mape if orig_mape > 0 else 0
+            bias_imp = (orig_bias - adj_bias) / orig_bias if orig_bias > 0 else 0
+            
+            most_common_action = np.argmax(np.bincount(sku_level_metrics[sku]["actions"]))
+            
+            sku_summary[sku] = {
+                "original_mape": orig_mape,
+                "adjusted_mape": adj_mape,
+                "mape_improvement": mape_imp,
+                "original_bias": orig_bias,
+                "adjusted_bias": adj_bias,
+                "bias_improvement": bias_imp,
+                "common_adjustment": self.adjustment_factors[most_common_action]
+            }
+        
+        # Sort SKUs by improvement
+        if self.optimize_for == "mape":
+            top_skus = sorted(sku_summary.items(), key=lambda x: x[1]["mape_improvement"], reverse=True)
+        elif self.optimize_for == "bias":
+            top_skus = sorted(sku_summary.items(), key=lambda x: x[1]["bias_improvement"], reverse=True)
+        else:  # "both"
+            top_skus = sorted(sku_summary.items(), 
+                             key=lambda x: x[1]["mape_improvement"] + x[1]["bias_improvement"], 
+                             reverse=True)
+        
+        # Create summary visualization
+        plt.figure(figsize=(15, 10))
+        
+        # MAPE improvement by SKU (top 20)
+        plt.subplot(2, 2, 1)
+        if len(top_skus) > 0:
+            top_20_skus = [sku for sku, _ in top_skus[:min(20, len(top_skus))]]
+            mape_imps = [sku_summary[sku]["mape_improvement"] for sku in top_20_skus]
+            plt.bar(range(len(top_20_skus)), mape_imps)
+            plt.xticks(range(len(top_20_skus)), top_20_skus, rotation=90)
+            plt.title('MAPE Improvement by SKU (Top 20)')
+            plt.ylabel('Improvement Ratio')
+        else:
+            plt.text(0.5, 0.5, "No SKU data available", ha='center', va='center')
+            plt.title('MAPE Improvement by SKU')
+        
+        # Bias improvement by SKU (top 20)
+        plt.subplot(2, 2, 2)
+        if len(top_skus) > 0:
+            bias_imps = [sku_summary[sku]["bias_improvement"] for sku in top_20_skus]
+            plt.bar(range(len(top_20_skus)), bias_imps)
+            plt.xticks(range(len(top_20_skus)), top_20_skus, rotation=90)
+            plt.title('Bias Improvement by SKU (Top 20)')
+            plt.ylabel('Improvement Ratio')
+        else:
+            plt.text(0.5, 0.5, "No SKU data available", ha='center', va='center')
+            plt.title('Bias Improvement by SKU')
+        
+        # Distribution of adjustment factors
+        plt.subplot(2, 2, 3)
+        adjustment_counts = [0] * len(self.adjustment_factors)
+        for sku in self.env.skus:
+            for action in sku_level_metrics[sku]["actions"]:
+                adjustment_counts[action] += 1
+        
+        total = sum(adjustment_counts)
+        if total > 0:
+            adjustment_dist = [count / total for count in adjustment_counts]
+            labels = [f"{factor:.1f}x" for factor in self.adjustment_factors]
+            plt.bar(labels, adjustment_dist)
+            plt.title('Adjustment Factor Distribution')
+            plt.ylabel('Frequency')
+        
+        # Average improvements
+        plt.subplot(2, 2, 4)
+        plt.bar(['MAPE', 'Bias'], [avg_mape_improvement, avg_bias_improvement])
+        plt.title('Average Improvements')
+        plt.ylabel('Improvement Ratio')
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.log_dir, 'evaluation_summary.png'))
         
         self.logger.info(f"Evaluation complete | "
                       f"Avg Score: {avg_score:.2f} | "
-                      f"Avg Service: {avg_service_level:.4f} | "
-                      f"Avg Waste: {avg_waste_percentage:.4f}")
+                      f"Avg MAPE Imp: {avg_mape_improvement:.4f} | "
+                      f"Avg Bias Imp: {avg_bias_improvement:.4f}")
         
         # Return metrics
         metrics = {
             'scores': eval_scores,
-            'service_levels': eval_service_levels,
-            'waste_percentages': eval_waste_percentages,
+            'mape_improvements': eval_mape_improvements,
+            'bias_improvements': eval_bias_improvements,
             'avg_score': avg_score,
-            'avg_service_level': avg_service_level,
-            'avg_waste_percentage': avg_waste_percentage
+            'avg_mape_improvement': avg_mape_improvement,
+            'avg_bias_improvement': avg_bias_improvement,
+            'sku_metrics': sku_summary,
+            'top_skus': top_skus
         }
         
         return metrics
     
-    def predict_orders(self, num_days: int = 14) -> pd.DataFrame:
+    def generate_adjusted_forecasts(self, num_days: int = 14) -> pd.DataFrame:
         """
-        Generate order predictions using the linear agent.
+        Generate adjusted forecasts using the trained agent.
         
         Args:
-            num_days: Number of days to predict
+            num_days: Number of days to forecast
             
         Returns:
-            DataFrame of order predictions
+            DataFrame of adjusted forecasts
         """
-        self.logger.info(f"Generating order predictions for {num_days} days")
+        self.logger.info(f"Generating adjusted forecasts for {num_days} days")
         
         # Reset environment
         state = self.env.reset()
         
         # Predictions storage
-        predictions = []
+        forecast_adjustments = []
         
         for day in range(min(num_days, self.max_steps)):
             # Process each SKU
             for i, sku in enumerate(self.env.skus):
                 # Extract state components
-                inventory_dim, forecast_dim, demand_dim = self.env.get_feature_dims()
+                forecast_dim, error_dim, feature_dim = self.env.get_feature_dims()
                 
                 # State features for this SKU
                 sku_state = state[i]
@@ -441,40 +556,30 @@ class Trainer:
                     # Regular agent
                     action_idx = self.agent.act(sku_state, explore=False)
                 
-                # For each lead time (typically 2-3 days)
-                for lead_time in range(2, 4):
-                    forecast_idx = min(day + lead_time, forecast_dim // 2 - 1)
+                # Extract forecasts from state
+                forecasts = sku_state[:forecast_dim]
+                
+                # For each forecast day
+                for forecast_day in range(forecast_dim):
+                    original_forecast = forecasts[forecast_day]
                     
-                    # Extract ML and ARIMA forecasts
-                    forecast_features = sku_state[inventory_dim:inventory_dim+forecast_dim]
-                    ml_forecast = forecast_features[forecast_idx]
-                    arima_forecast = forecast_features[forecast_idx + forecast_dim // 2]
-                    
-                    # Blend forecasts
-                    blended_forecast = (ml_forecast + arima_forecast) / 2
-                    
-                    # Calculate order quantity
-                    action_multipliers = [0.0, 0.5, 0.8, 1.0, 1.2, 1.5, 2.0]
-                    multiplier = action_multipliers[action_idx]
-                    order_quantity = int(blended_forecast * multiplier)
+                    # Apply adjustment factor
+                    factor = self.adjustment_factors[action_idx]
+                    adjusted_forecast = original_forecast * factor
                     
                     # Add to predictions
-                    predictions.append({
+                    forecast_adjustments.append({
                         'sku_id': sku,
                         'day': day,
-                        'lead_time': lead_time,
-                        'delivery_day': day + lead_time,
-                        'ml_forecast': float(ml_forecast),
-                        'arima_forecast': float(arima_forecast),
-                        'blended_forecast': float(blended_forecast),
-                        'action_idx': int(action_idx),
-                        'multiplier': float(multiplier),
-                        'order_quantity': order_quantity,
-                        'current_inventory': float(sku_state[0] * 1000)
+                        'forecast_day': forecast_day,
+                        'original_forecast': float(original_forecast),
+                        'adjustment_factor': float(factor),
+                        'adjusted_forecast': float(adjusted_forecast),
+                        'action_idx': int(action_idx)
                     })
             
-            # Calculate actions for environment step
-            actions = {}
+            # Calculate adjustments for environment step
+            adjustments = {}
             for i, sku in enumerate(self.env.skus):
                 # State features
                 sku_state = state[i]
@@ -485,24 +590,24 @@ class Trainer:
                 else:
                     action_idx = self.agent.act(sku_state, explore=False)
                 
-                # Extract forecasts for current day
-                forecast_features = sku_state[inventory_dim:inventory_dim+forecast_dim]
-                forecast_idx = min(day, forecast_dim // 2 - 1)
-                ml_forecast = forecast_features[forecast_idx]
-                arima_forecast = forecast_features[forecast_idx + forecast_dim // 2]
-                blended_forecast = (ml_forecast + arima_forecast) / 2
+                # Extract current forecast
+                forecast_dim, _, _ = self.env.get_feature_dims()
+                current_forecast = sku_state[0]  # First forecast
                 
-                # Calculate order
-                action_multipliers = [0.0, 0.5, 0.8, 1.0, 1.2, 1.5, 2.0]
-                order_quantity = int(blended_forecast * action_multipliers[action_idx])
-                actions[sku] = order_quantity
+                # Calculate adjusted forecast
+                if hasattr(self.agent, 'get_cluster_id'):
+                    adjusted_forecast = self.agent.calculate_adjusted_forecast(action_idx, current_forecast, sku)
+                else:
+                    adjusted_forecast = self.agent.calculate_adjusted_forecast(action_idx, current_forecast)
+                
+                adjustments[sku] = (action_idx, adjusted_forecast)
             
             # Take environment step
-            next_state, _, done, _ = self.env.step(actions)
+            next_state, _, done, _ = self.env.step(adjustments)
             state = next_state
             
             if done:
                 break
         
         # Convert to DataFrame
-        return pd.DataFrame(predictions)
+        return pd.DataFrame(forecast_adjustments)

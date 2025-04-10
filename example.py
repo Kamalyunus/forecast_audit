@@ -1,5 +1,5 @@
 """
-Example usage of Linear Function Approximation for inventory management.
+Example usage of Linear Function Approximation for forecast adjustment.
 """
 
 import os
@@ -10,14 +10,12 @@ import time
 from datetime import datetime
 import logging
 
-from inventory_rl.data.data_generator import generate_sample_data
-from inventory_rl.environment.inventory_env import InventoryEnvironment
-from inventory_rl.utils.config import Config, RewardConfig
-
-# Import linear agent implementation
+# Import forecast adjustment components
+from forecast_environment import ForecastEnvironment
 from linear_agent import LinearAgent, ClusteredLinearAgent
-from trainer import Trainer
+from trainer import ForecastAdjustmentTrainer
 from clustering import cluster_skus
+from generate_example_data import generate_forecast_data
 
 
 def setup_logging():
@@ -29,43 +27,90 @@ def setup_logging():
     return logging.getLogger("Example")
 
 
+def generate_sample_data(num_skus=100):
+    """Generate sample forecast and historical data."""
+    logger = logging.getLogger("DataGeneration")
+    logger.info(f"Generating sample data with {num_skus} SKUs")
+    
+    # Generate forecast data
+    forecast_data = generate_forecast_data(num_skus=num_skus, forecast_days=14)
+    
+    # Generate synthetic historical data
+    historical_records = []
+    
+    for i in range(num_skus):
+        sku_id = f"SKU_{i:04d}"
+        
+        # Extract forecast pattern for this SKU
+        sku_forecasts = forecast_data[forecast_data['sku_id'] == sku_id]
+        ml_cols = [col for col in sku_forecasts.columns if col.startswith('ml_day_')]
+        
+        if not sku_forecasts.empty:
+            ml_values = sku_forecasts[ml_cols].iloc[0].values
+            # Add noise and bias to create "actual" historical values
+            mape = sku_forecasts['ml_mape_30d'].iloc[0]
+            bias = sku_forecasts['ml_bias_30d'].iloc[0]
+            
+            # Create historical data for the last 60 days
+            for day in range(60):
+                # Use cyclic pattern from forecast with slight variations
+                base_pattern_idx = day % len(ml_values)
+                base_value = ml_values[base_pattern_idx]
+                
+                # Apply bias and random noise
+                biased_value = base_value * (1 + bias)
+                noise_range = biased_value * mape
+                actual_value = max(0, biased_value + np.random.uniform(-noise_range, noise_range))
+                
+                # Use ISO format date to avoid parsing issues
+                sale_date = f"2023-01-{day+1:02d}"
+                
+                historical_records.append({
+                    'sku_id': sku_id,
+                    'sale_date': sale_date,
+                    'quantity': int(actual_value)
+                })
+    
+    # Create historical data DataFrame
+    historical_data = pd.DataFrame(historical_records)
+    logger.info(f"Generated {len(historical_data)} historical records for {num_skus} SKUs")
+    
+    return forecast_data, historical_data
+
+
 def example_simple_agent():
-    """Example of training a simple linear agent."""
+    """Example of training a simple linear agent for forecast adjustment."""
     logger = setup_logging()
-    logger.info("Running example with simple linear agent")
+    logger.info("Running example with simple linear agent for forecast adjustment")
     
     # Generate sample data
     logger.info("Generating sample data")
-    inventory_data, forecast_data, historical_data, price_data, promo_data, weather_data = generate_sample_data(
-        num_skus=50  # Use a small number of SKUs for the example
-    )
+    forecast_data, historical_data = generate_sample_data(num_skus=50)
     
-    # Create configuration
-    config = Config()
-    config.reward = RewardConfig(
-        oos_penalty_factor=3.0,  # Higher penalty for stockouts
-        waste_penalty_factor=1.0
-    )
+    # Create output directory
+    output_dir = "example_output/forecast_adjustment"
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Save sample data
+    forecast_data.to_csv(f"{output_dir}/sample_forecast_data.csv", index=False)
+    historical_data.to_csv(f"{output_dir}/sample_historical_data.csv", index=False)
     
     # Create environment
-    env = InventoryEnvironment(
-        inventory_data=inventory_data,
+    env = ForecastEnvironment(
         forecast_data=forecast_data,
-        price_data=price_data,
-        promotion_data=promo_data,
-        weather_data=weather_data,
-        env_config=config.environment,
-        reward_config=config.reward
+        historical_data=historical_data,
+        validation_length=30,
+        forecast_horizon=7,
+        optimize_for="both"
     )
     
     # Get state dimensions
-    inventory_dim, forecast_dim, demand_dim = env.get_feature_dims()
-    feature_dim = inventory_dim + forecast_dim + demand_dim
+    forecast_dim, error_dim, feature_dim = env.get_feature_dims()
     
     # Create linear agent
     agent = LinearAgent(
         feature_dim=feature_dim,
-        action_size=7,  # [0, 0.5, 0.8, 1.0, 1.2, 1.5, 2.0] × forecast
+        action_size=7,  # [0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3] 
         learning_rate=0.01,
         gamma=0.99,
         epsilon_start=1.0,
@@ -73,363 +118,246 @@ def example_simple_agent():
         epsilon_decay=0.995
     )
     
-    # Create output directory
-    output_dir = "example_output/simple"
-    os.makedirs(output_dir, exist_ok=True)
-    
     # Create trainer
-    trainer = Trainer(
+    trainer = ForecastAdjustmentTrainer(
         agent=agent,
         environment=env,
         output_dir=output_dir,
-        num_episodes=200,  # Reduced for example
+        num_episodes=100,  # Reduced for example
         max_steps=14,
         batch_size=32,
-        save_every=50
+        save_every=20
     )
     
     # Train the agent
-    logger.info("Training linear agent")
+    logger.info("Training forecast adjustment agent")
     start_time = time.time()
     metrics = trainer.train()
     training_time = time.time() - start_time
     
     logger.info(f"Training completed in {training_time:.2f} seconds")
     logger.info(f"Final metrics:")
-    logger.info(f"  Average Score (last 100): {np.mean(metrics['scores'][-100:]):.2f}")
-    logger.info(f"  Average Service Level (last 100): {np.mean(metrics['service_levels'][-100:]):.4f}")
-    logger.info(f"  Average Waste % (last 100): {np.mean(metrics['waste_percentages'][-100:]):.4f}")
+    logger.info(f"  Average Score (last 50): {np.mean(metrics['scores'][-50:]):.2f}")
+    logger.info(f"  Average MAPE Improvement (last 50): {np.mean(metrics['mape_improvements'][-50:]):.4f}")
+    logger.info(f"  Average Bias Improvement (last 50): {np.mean(metrics['bias_improvements'][-50:]):.4f}")
     
     # Evaluate the agent
-    logger.info("Evaluating agent")
+    logger.info("Evaluating forecast adjustment agent")
     eval_metrics = trainer.evaluate(num_episodes=10)
     
     logger.info(f"Evaluation metrics:")
     logger.info(f"  Average Score: {eval_metrics['avg_score']:.2f}")
-    logger.info(f"  Average Service Level: {eval_metrics['avg_service_level']:.4f}")
-    logger.info(f"  Average Waste Percentage: {eval_metrics['avg_waste_percentage']:.4f}")
+    logger.info(f"  Average MAPE Improvement: {eval_metrics['avg_mape_improvement']:.4f}")
+    logger.info(f"  Average Bias Improvement: {eval_metrics['avg_bias_improvement']:.4f}")
     
-    # Generate predictions
-    logger.info("Generating predictions")
-    predictions = trainer.predict_orders(num_days=14)
+    # Generate adjusted forecasts
+    logger.info("Generating adjusted forecasts")
+    adjustments = trainer.generate_adjusted_forecasts(num_days=14)
     
-    # Save predictions
-    predictions_path = os.path.join(output_dir, "predictions.csv")
-    predictions.to_csv(predictions_path, index=False)
+    # Save adjustments
+    adjustments_path = os.path.join(output_dir, "adjusted_forecasts.csv")
+    adjustments.to_csv(adjustments_path, index=False)
     
-    logger.info(f"Predictions saved to {predictions_path}")
+    logger.info(f"Adjusted forecasts saved to {adjustments_path}")
     logger.info(f"Example completed successfully")
     
     return agent, env, trainer
 
 
-def example_clustered_agent():
-    """Example of training a clustered linear agent."""
+def optimize_for_mape():
+    """Example of optimizing specifically for MAPE improvement."""
     logger = setup_logging()
-    logger.info("Running example with clustered linear agent")
+    logger.info("Running example optimizing specifically for MAPE")
     
-    # Generate sample data with more SKUs
+    # Generate sample data
     logger.info("Generating sample data")
-    inventory_data, forecast_data, historical_data, price_data, promo_data, weather_data = generate_sample_data(
-        num_skus=200  # More SKUs to demonstrate clustering
-    )
+    forecast_data, historical_data = generate_sample_data(num_skus=100)
     
-    # Create configuration
-    config = Config()
-    config.reward = RewardConfig(
-        oos_penalty_factor=3.0,
-        waste_penalty_factor=1.0
-    )
+    # Create output directories
+    mape_dir = "example_output/mape_optimization"
+    bias_dir = "example_output/bias_optimization"
+    os.makedirs(mape_dir, exist_ok=True)
+    os.makedirs(bias_dir, exist_ok=True)
     
-    # Create environment
-    env = InventoryEnvironment(
-        inventory_data=inventory_data,
+    # Create environment optimized for MAPE
+    mape_env = ForecastEnvironment(
         forecast_data=forecast_data,
-        price_data=price_data,
-        promotion_data=promo_data,
-        weather_data=weather_data,
-        env_config=config.environment,
-        reward_config=config.reward
-    )
-    
-    # Get state dimensions
-    inventory_dim, forecast_dim, demand_dim = env.get_feature_dims()
-    feature_dim = inventory_dim + forecast_dim + demand_dim
-    
-    # Number of clusters
-    num_clusters = 5  # Use 5 clusters for demonstration
-    
-    # Create clustered agent
-    agent = ClusteredLinearAgent(
-        num_clusters=num_clusters,
-        feature_dim=feature_dim,
-        action_size=7,  # [0, 0.5, 0.8, 1.0, 1.2, 1.5, 2.0] × forecast
-        learning_rate=0.01,
-        gamma=0.99
-    )
-    
-    # Create cluster mapping
-    logger.info("Clustering SKUs")
-    cluster_mapping = cluster_skus(
-        forecast_data=forecast_data,
-        inventory_data=inventory_data,
         historical_data=historical_data,
-        num_clusters=num_clusters,
-        logger=logger
+        validation_length=30,
+        forecast_horizon=7,
+        optimize_for="mape"  # Focus on MAPE
     )
     
-    # Set cluster mapping in agent
-    agent.set_cluster_mapping(cluster_mapping)
+    # Create environment optimized for bias
+    bias_env = ForecastEnvironment(
+        forecast_data=forecast_data,
+        historical_data=historical_data,
+        validation_length=30,
+        forecast_horizon=7,
+        optimize_for="bias"  # Focus on bias
+    )
     
-    # Create output directory
-    output_dir = "example_output/clustered"
-    os.makedirs(output_dir, exist_ok=True)
+    # Get dimensions
+    forecast_dim, error_dim, feature_dim = mape_env.get_feature_dims()
     
-    # Save cluster mapping
-    mapping_path = os.path.join(output_dir, "cluster_mapping.json")
-    with open(mapping_path, 'w') as f:
-        json.dump({str(k): int(v) for k, v in cluster_mapping.items()}, f)
+    # Create agents
+    mape_agent = LinearAgent(
+        feature_dim=feature_dim,
+        action_size=7,
+        learning_rate=0.01,
+        gamma=0.99,
+        epsilon_start=1.0,
+        epsilon_end=0.01,
+        epsilon_decay=0.995
+    )
     
-    # Create trainer
-    trainer = Trainer(
-        agent=agent,
-        environment=env,
-        output_dir=output_dir,
-        num_episodes=200,  # Reduced for example
+    bias_agent = LinearAgent(
+        feature_dim=feature_dim,
+        action_size=7,
+        learning_rate=0.01,
+        gamma=0.99,
+        epsilon_start=1.0,
+        epsilon_end=0.01,
+        epsilon_decay=0.995
+    )
+    
+    # Create trainers
+    mape_trainer = ForecastAdjustmentTrainer(
+        agent=mape_agent,
+        environment=mape_env,
+        output_dir=mape_dir,
+        num_episodes=100,
         max_steps=14,
         batch_size=32,
-        save_every=50
+        save_every=20,
+        optimize_for="mape"
     )
     
-    # Train the agent
-    logger.info("Training clustered linear agent")
-    start_time = time.time()
-    metrics = trainer.train()
-    training_time = time.time() - start_time
+    bias_trainer = ForecastAdjustmentTrainer(
+        agent=bias_agent,
+        environment=bias_env,
+        output_dir=bias_dir,
+        num_episodes=100,
+        max_steps=14,
+        batch_size=32,
+        save_every=20,
+        optimize_for="bias"
+    )
     
-    logger.info(f"Training completed in {training_time:.2f} seconds")
-    logger.info(f"Final metrics:")
-    logger.info(f"  Average Score (last 100): {np.mean(metrics['scores'][-100:]):.2f}")
-    logger.info(f"  Average Service Level (last 100): {np.mean(metrics['service_levels'][-100:]):.4f}")
-    logger.info(f"  Average Waste % (last 100): {np.mean(metrics['waste_percentages'][-100:]):.4f}")
+    # Train both agents
+    logger.info("Training MAPE-optimized agent")
+    mape_metrics = mape_trainer.train()
     
-    # Evaluate the agent
-    logger.info("Evaluating agent")
-    eval_metrics = trainer.evaluate(num_episodes=10)
+    logger.info("Training Bias-optimized agent")
+    bias_metrics = bias_trainer.train()
     
-    logger.info(f"Evaluation metrics:")
-    logger.info(f"  Average Score: {eval_metrics['avg_score']:.2f}")
-    logger.info(f"  Average Service Level: {eval_metrics['avg_service_level']:.4f}")
-    logger.info(f"  Average Waste Percentage: {eval_metrics['avg_waste_percentage']:.4f}")
+    # Evaluate both agents
+    logger.info("Evaluating MAPE-optimized agent")
+    mape_eval = mape_trainer.evaluate(num_episodes=10)
     
-    # Analyze cluster-specific performance
-    logger.info("Cluster-specific action distributions:")
-    for cluster_id in range(num_clusters):
-        cluster_agent = agent.agents[cluster_id]
-        action_counts = cluster_agent.action_counts
-        total_actions = np.sum(action_counts)
-        if total_actions > 0:
-            action_distribution = action_counts / total_actions
-            logger.info(f"  Cluster {cluster_id}: {action_distribution.round(3)}")
+    logger.info("Evaluating Bias-optimized agent")
+    bias_eval = bias_trainer.evaluate(num_episodes=10)
     
-    # Generate predictions
-    logger.info("Generating predictions")
-    predictions = trainer.predict_orders(num_days=14)
+    # Compare results
+    logger.info(f"Comparison of optimization strategies:")
+    logger.info(f"  MAPE-optimized: MAPE Imp = {mape_eval['avg_mape_improvement']:.4f}, Bias Imp = {mape_eval['avg_bias_improvement']:.4f}")
+    logger.info(f"  Bias-optimized: MAPE Imp = {bias_eval['avg_mape_improvement']:.4f}, Bias Imp = {bias_eval['avg_bias_improvement']:.4f}")
     
-    # Save predictions
-    predictions_path = os.path.join(output_dir, "predictions.csv")
-    predictions.to_csv(predictions_path, index=False)
+    # Generate forecasts from both agents
+    mape_forecasts = mape_trainer.generate_adjusted_forecasts(num_days=14)
+    bias_forecasts = bias_trainer.generate_adjusted_forecasts(num_days=14)
     
-    logger.info(f"Predictions saved to {predictions_path}")
-    logger.info(f"Example completed successfully")
+    # Save forecasts
+    mape_forecasts.to_csv(os.path.join(mape_dir, "mape_adjusted_forecasts.csv"), index=False)
+    bias_forecasts.to_csv(os.path.join(bias_dir, "bias_adjusted_forecasts.csv"), index=False)
     
-    return agent, env, trainer
-
-
-def performance_benchmark():
-    """Benchmark performance with increasing number of SKUs."""
-    logger = setup_logging()
-    logger.info("Running performance benchmark")
+    # Create comparative visualization
+    plt.figure(figsize=(15, 10))
     
-    # SKU counts to test
-    sku_counts = [100, 500, 1000, 5000]
-    
-    # Results storage
-    results = []
-    
-    for num_skus in sku_counts:
-        logger.info(f"Testing with {num_skus} SKUs")
-        
-        # Generate sample data
-        inventory_data, forecast_data, _, price_data, promo_data, weather_data = generate_sample_data(
-            num_skus=num_skus
-        )
-        
-        # Create environment
-        config = Config()
-        env = InventoryEnvironment(
-            inventory_data=inventory_data,
-            forecast_data=forecast_data,
-            price_data=price_data,
-            promotion_data=promo_data,
-            weather_data=weather_data,
-            env_config=config.environment,
-            reward_config=config.reward
-        )
-        
-        # Get dimensions
-        inventory_dim, forecast_dim, demand_dim = env.get_feature_dims()
-        feature_dim = inventory_dim + forecast_dim + demand_dim
-        
-        # Create output directory
-        output_dir = f"benchmark_output/{num_skus}_skus"
-        os.makedirs(output_dir, exist_ok=True)
-        
-        # Test simple agent
-        logger.info("Testing simple agent")
-        simple_agent = LinearAgent(
-            feature_dim=feature_dim,
-            action_size=7
-        )
-        
-        simple_trainer = Trainer(
-            agent=simple_agent,
-            environment=env,
-            output_dir=output_dir,
-            num_episodes=5  # Just for benchmarking
-        )
-        
-        # Measure training time
-        start_time = time.time()
-        simple_trainer.train(verbose=False)
-        simple_train_time = time.time() - start_time
-        
-        # Measure prediction time
-        start_time = time.time()
-        simple_trainer.predict_orders(num_days=7)
-        simple_predict_time = time.time() - start_time
-        
-        # Test clustered agent
-        logger.info("Testing clustered agent")
-        num_clusters = min(20, num_skus // 50 + 1)  # Simple heuristic
-        
-        clustered_agent = ClusteredLinearAgent(
-            num_clusters=num_clusters,
-            feature_dim=feature_dim,
-            action_size=7
-        )
-        
-        # Simple clustering
-        cluster_mapping = {sku: i % num_clusters for i, sku in enumerate(env.skus)}
-        clustered_agent.set_cluster_mapping(cluster_mapping)
-        
-        clustered_trainer = Trainer(
-            agent=clustered_agent,
-            environment=env,
-            output_dir=output_dir,
-            num_episodes=5  # Just for benchmarking
-        )
-        
-        # Measure training time
-        start_time = time.time()
-        clustered_trainer.train(verbose=False)
-        clustered_train_time = time.time() - start_time
-        
-        # Measure prediction time
-        start_time = time.time()
-        clustered_trainer.predict_orders(num_days=7)
-        clustered_predict_time = time.time() - start_time
-        
-        # Store results
-        results.append({
-            'num_skus': num_skus,
-            'simple_train_time': simple_train_time,
-            'simple_predict_time': simple_predict_time,
-            'clustered_train_time': clustered_train_time,
-            'clustered_predict_time': clustered_predict_time,
-            'num_clusters': num_clusters
-        })
-        
-        logger.info(f"Results for {num_skus} SKUs:")
-        logger.info(f"  Simple Agent - Train: {simple_train_time:.2f}s, Predict: {simple_predict_time:.2f}s")
-        logger.info(f"  Clustered Agent ({num_clusters} clusters) - Train: {clustered_train_time:.2f}s, Predict: {clustered_predict_time:.2f}s")
-    
-    # Create results DataFrame
-    results_df = pd.DataFrame(results)
-    
-    # Save results
-    benchmark_dir = "benchmark_output"
-    os.makedirs(benchmark_dir, exist_ok=True)
-    results_df.to_csv(os.path.join(benchmark_dir, "benchmark_results.csv"), index=False)
-    
-    # Create visualization
-    plt.figure(figsize=(12, 10))
-    
-    # Training time
+    # Training progress comparison (MAPE improvement)
     plt.subplot(2, 2, 1)
-    plt.plot(results_df['num_skus'], results_df['simple_train_time'], 'bo-', label='Simple Agent')
-    plt.plot(results_df['num_skus'], results_df['clustered_train_time'], 'ro-', label='Clustered Agent')
-    plt.title('Training Time Scaling')
-    plt.xlabel('Number of SKUs')
-    plt.ylabel('Time (seconds)')
+    plt.plot(mape_metrics['mape_improvements'], 'b-', label='MAPE-optimized')
+    plt.plot(bias_metrics['mape_improvements'], 'r-', label='Bias-optimized')
+    plt.title('MAPE Improvement During Training')
+    plt.xlabel('Episode')
+    plt.ylabel('Improvement Ratio')
     plt.legend()
     plt.grid(True, alpha=0.3)
     
-    # Prediction time
+    # Training progress comparison (Bias improvement)
     plt.subplot(2, 2, 2)
-    plt.plot(results_df['num_skus'], results_df['simple_predict_time'], 'bo-', label='Simple Agent')
-    plt.plot(results_df['num_skus'], results_df['clustered_predict_time'], 'ro-', label='Clustered Agent')
-    plt.title('Prediction Time Scaling')
-    plt.xlabel('Number of SKUs')
-    plt.ylabel('Time (seconds)')
+    plt.plot(mape_metrics['bias_improvements'], 'b-', label='MAPE-optimized')
+    plt.plot(bias_metrics['bias_improvements'], 'r-', label='Bias-optimized')
+    plt.title('Bias Improvement During Training')
+    plt.xlabel('Episode')
+    plt.ylabel('Improvement Ratio')
     plt.legend()
     plt.grid(True, alpha=0.3)
     
-    # Training time per SKU
+    # Action distribution comparison
     plt.subplot(2, 2, 3)
-    simple_train_per_sku = results_df['simple_train_time'] / results_df['num_skus']
-    clustered_train_per_sku = results_df['clustered_train_time'] / results_df['num_skus']
-    plt.plot(results_df['num_skus'], simple_train_per_sku * 1000, 'bo-', label='Simple Agent')
-    plt.plot(results_df['num_skus'], clustered_train_per_sku * 1000, 'ro-', label='Clustered Agent')
-    plt.title('Training Time per SKU')
-    plt.xlabel('Number of SKUs')
-    plt.ylabel('Time (milliseconds per SKU)')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
     
-    # Prediction time per SKU
-    plt.subplot(2, 2, 4)
-    simple_predict_per_sku = results_df['simple_predict_time'] / results_df['num_skus']
-    clustered_predict_per_sku = results_df['clustered_predict_time'] / results_df['num_skus']
-    plt.plot(results_df['num_skus'], simple_predict_per_sku * 1000, 'bo-', label='Simple Agent')
-    plt.plot(results_df['num_skus'], clustered_predict_per_sku * 1000, 'ro-', label='Clustered Agent')
-    plt.title('Prediction Time per SKU')
-    plt.xlabel('Number of SKUs')
-    plt.ylabel('Time (milliseconds per SKU)')
+    # MAPE-optimized agent actions
+    mape_actions = mape_agent.action_counts
+    mape_total = np.sum(mape_actions)
+    mape_dist = mape_actions / mape_total if mape_total > 0 else np.zeros_like(mape_actions)
+    
+    # Bias-optimized agent actions
+    bias_actions = bias_agent.action_counts
+    bias_total = np.sum(bias_actions)
+    bias_dist = bias_actions / bias_total if bias_total > 0 else np.zeros_like(bias_actions)
+    
+    # Plot comparison
+    adjustment_factors = [0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3]
+    x = np.arange(len(adjustment_factors))
+    width = 0.35
+    
+    plt.bar(x - width/2, mape_dist, width, label='MAPE-optimized')
+    plt.bar(x + width/2, bias_dist, width, label='Bias-optimized')
+    
+    plt.xlabel('Adjustment Factor')
+    plt.ylabel('Frequency')
+    plt.title('Action Distribution Comparison')
+    plt.xticks(x, [f"{f:.1f}x" for f in adjustment_factors])
     plt.legend()
-    plt.grid(True, alpha=0.3)
+    
+    # Final performance comparison
+    plt.subplot(2, 2, 4)
+    metrics = ['MAPE Improvement', 'Bias Improvement']
+    mape_values = [mape_eval['avg_mape_improvement'], mape_eval['avg_bias_improvement']]
+    bias_values = [bias_eval['avg_mape_improvement'], bias_eval['avg_bias_improvement']]
+    
+    x = np.arange(len(metrics))
+    width = 0.35
+    
+    plt.bar(x - width/2, mape_values, width, label='MAPE-optimized')
+    plt.bar(x + width/2, bias_values, width, label='Bias-optimized')
+    
+    plt.xlabel('Metric')
+    plt.ylabel('Improvement Ratio')
+    plt.title('Final Performance Comparison')
+    plt.xticks(x, metrics)
+    plt.legend()
     
     plt.tight_layout()
-    plt.savefig(os.path.join(benchmark_dir, "benchmark_results.png"))
+    plt.savefig("example_output/optimization_comparison.png")
+    logger.info("Comparative visualization saved to example_output/optimization_comparison.png")
     
-    logger.info(f"Benchmark results saved to {benchmark_dir}")
+    logger.info("Optimization comparison completed successfully")
     
-    return results_df
+    return mape_agent, bias_agent
 
 
 if __name__ == "__main__":
-    print("Linear Function Approximation Examples")
-    print("1. Train simple linear agent")
-    print("2. Train clustered linear agent")
-    print("3. Run performance benchmark")
+    print("Forecast Adjustment Examples")
+    print("1. Train simple linear agent for forecast adjustment")
+    print("2. Compare MAPE vs Bias optimization strategies")
     
-    choice = input("Enter your choice (1-3): ")
+    choice = input("Enter your choice (1-2): ")
     
     if choice == '1':
         example_simple_agent()
     elif choice == '2':
-        example_clustered_agent()
-    elif choice == '3':
-        performance_benchmark()
+        optimize_for_mape()
     else:
         print("Invalid choice!")
